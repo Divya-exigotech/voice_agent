@@ -19,7 +19,9 @@ class Agent(UUIDPrimaryKey, Timestamps, Base):
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     voice: Mapped[str | None] = mapped_column(String(100))
     language: Mapped[str | None] = mapped_column(String(50))
-    configuration: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    configuration: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
 
 
 class Workflow(UUIDPrimaryKey, Timestamps, Base):
