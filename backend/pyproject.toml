@@ -11,6 +11,7 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
+"scripts/**" = ["T201"]  # the CLI harness prints to the developer's own terminal
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

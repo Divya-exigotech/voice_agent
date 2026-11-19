@@ -4,6 +4,7 @@ from enum import StrEnum
 from pydantic import BaseModel
 
 from app.schemas.customer import Customer
+from app.schemas.transcript import TranscriptTurn
 
 
 class SessionStatus(StrEnum):
@@ -18,6 +19,8 @@ class SessionRecord(BaseModel):
     status: SessionStatus
     started_at: datetime
     ended_at: datetime | None = None
+    conversation_id: str | None = None
+    transcript: list[TranscriptTurn] = []
 
 
 class QueueState(BaseModel):
