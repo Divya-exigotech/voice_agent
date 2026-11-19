@@ -20,8 +20,7 @@ import {
 
 import { ChatComposer } from "./ChatComposer";
 import { CurrentCustomerCard } from "./CurrentCustomerCard";
-import { DemoGuide } from "./DemoGuide";
-import { LastSessionCard, type LastSession } from "./LastSessionCard";
+import { SessionSavedNotice, type LastSession } from "./SessionSavedNotice";
 import { SequenceProgress } from "./SequenceProgress";
 import { SystemStatus } from "./SystemStatus";
 import { TranscriptPanel } from "./TranscriptPanel";
@@ -107,6 +106,7 @@ export function Dashboard() {
   const customer = queue?.current_customer ?? null;
   const canStart = !!customer && !queue?.completed && sessionId === null && !busy;
   const canEnd = sessionId !== null && !busy;
+  const showTranscript = sessionId !== null || busy;
   const canChat = sessionId !== null && !busy;
 
   function applyTranscript(sid: string, update: TranscriptUpdate) {
@@ -304,10 +304,12 @@ export function Dashboard() {
 
   return (
     <div className="dashboard">
-      <SystemStatus health={health} error={healthError} />
-      <DemoGuide />
-      <SequenceProgress queue={queue} />
-      <div className="grid">
+      <div className="agent-top">
+        <SystemStatus health={health} error={healthError} />
+        <SequenceProgress queue={queue} />
+      </div>
+      {last && !sessionId && <SessionSavedNotice key={last.session.session_id} last={last} />}
+      <div className={`grid agent-grid${showTranscript ? " agent-live" : " agent-idle"}`}>
         <div className="column">
           {customer ? (
             <CurrentCustomerCard customer={customer} />
@@ -328,9 +330,6 @@ export function Dashboard() {
               )}
             </section>
           )}
-          {last && <LastSessionCard key={last.session.session_id} last={last} />}
-        </div>
-        <div className="column">
           <VoiceSessionPanel
             status={status}
             mode={mode}
@@ -349,6 +348,10 @@ export function Dashboard() {
             onEnd={() => void handleEnd()}
             onToggleMute={handleToggleMute}
           />
+          
+        </div>
+        {showTranscript && (
+        <div className="column">
           <TranscriptPanel turns={turns} thinking={thinking}>
             <ChatComposer
               disabled={!canChat}
@@ -357,6 +360,7 @@ export function Dashboard() {
             />
           </TranscriptPanel>
         </div>
+        )}
       </div>
     </div>
   );
