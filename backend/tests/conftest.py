@@ -16,6 +16,12 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_foundry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests hermetic even if backend/.env holds real Foundry settings."""
+    monkeypatch.setattr(settings, "AZURE_AI_PROJECT_ENDPOINT", "")
+
+
 @pytest.fixture
 async def customers() -> list[Customer]:
     return await load_customers(settings.CUSTOMERS_FILE)

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from app.schemas.customer import Customer
 from app.schemas.session import QueueState, SessionRecord, SessionStatus
+from app.schemas.transcript import TranscriptTurn
 
 
 class QueueCompletedError(RuntimeError):
@@ -18,6 +19,10 @@ class SessionNotFoundError(KeyError):
     """No session with the given id exists."""
 
 
+class StreamUnavailableError(RuntimeError):
+    """The session is not active or already has a live voice stream."""
+
+
 class SequenceService:
     """Sequential, in-memory customer queue.
 
@@ -30,6 +35,7 @@ class SequenceService:
         self._index = 0
         self._sessions: dict[str, SessionRecord] = {}
         self._active_id: str | None = None
+        self._streaming: set[str] = set()
         self._lock = asyncio.Lock()
 
     def _state(self) -> QueueState:
@@ -81,3 +87,32 @@ class SequenceService:
                 self._active_id = None
                 self._index += 1
             return self._state()
+
+    async def open_stream(self, session_id: str) -> Customer:
+        """Claim the single live voice stream of an active session; return its customer."""
+        async with self._lock:
+            record = self._sessions.get(session_id)
+            if record is None:
+                raise SessionNotFoundError(session_id)
+            if record.status is not SessionStatus.ACTIVE or session_id in self._streaming:
+                raise StreamUnavailableError(session_id)
+            self._streaming.add(session_id)
+            return next(c for c in self._customers if c.customer_id == record.customer_id)
+
+    async def close_stream(
+        self, session_id: str, turns: list[TranscriptTurn], conversation_id: str | None
+    ) -> None:
+        """Release the stream and keep whatever transcript was captured (also on failure)."""
+        async with self._lock:
+            self._streaming.discard(session_id)
+            record = self._sessions.get(session_id)
+            if record is not None:
+                record.transcript = list(turns)
+                record.conversation_id = conversation_id
+
+    async def get_session(self, session_id: str) -> SessionRecord:
+        async with self._lock:
+            record = self._sessions.get(session_id)
+            if record is None:
+                raise SessionNotFoundError(session_id)
+            return record.model_copy(deep=True)
