@@ -19,6 +19,11 @@ export interface Customer {
   invoice: Invoice;
 }
 
+export interface CustomerListResponse {
+  total: number;
+  customers: Customer[];
+}
+
 export interface QueueState {
   total: number;
   current_index: number;

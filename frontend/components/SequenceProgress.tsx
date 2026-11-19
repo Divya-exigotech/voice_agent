@@ -16,6 +16,16 @@ export function SequenceProgress({ queue }: { queue: QueueState }) {
         </strong>
         <span className="muted">{queue.remaining} remaining</span>
       </div>
+      <ol className="steps" aria-hidden="true">
+        {Array.from({ length: queue.total }, (_, i) => (
+          <li
+            key={i}
+            className={`step ${i < done ? "step-done" : i === queue.current_index && !queue.completed ? "step-current" : ""}`}
+          >
+            {i < done ? "✓" : i + 1}
+          </li>
+        ))}
+      </ol>
       <div
         className="progress-track"
         role="progressbar"

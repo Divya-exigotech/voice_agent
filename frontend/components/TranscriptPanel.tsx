@@ -11,7 +11,7 @@ interface Props {
 
 export function TranscriptPanel({ turns, thinking = false, children }: Props) {
   return (
-    <section className="card" aria-label="Transcript">
+    <section className="card transcript-card" aria-label="Transcript">
       <p className="eyebrow">Live transcript</p>
       {turns.length === 0 && !thinking ? (
         <p className="muted small">No turns yet. Press Start Agent to begin the conversation.</p>

@@ -1,5 +1,6 @@
 import type {
   ChatResponse,
+  CustomerListResponse,
   FinalizeSessionRequest,
   FinalizeSessionResponse,
   Health,
@@ -52,6 +53,10 @@ export const api = {
   getHealth: () => request<Health>("/health"),
 
   getQueue: () => request<QueueState>("/queue"),
+
+  listCustomers: () => request<CustomerListResponse>("/customers"),
+
+  listSessions: () => request<SessionRecord[]>("/sessions"),
 
   startSession: (expectedCustomerId: string) =>
     request<SessionRecord>("/sessions", {

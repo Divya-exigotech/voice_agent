@@ -224,7 +224,7 @@ describe("Dashboard", () => {
     });
     expect(await screen.findByText("Customer 2 of 3")).toBeInTheDocument();
     expect(screen.getByText("Mira Shah")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Last session" })).toHaveTextContent("Payment promised");
+    expect(screen.getByRole("region", { name: "Session saved" })).toHaveTextContent("Payment promised");
     expect(screen.getByTestId("session-status")).toHaveTextContent("Completed");
     expect(screen.getByTestId("mic-state")).toHaveTextContent("Off");
     expect(screen.getByRole("button", { name: "Start Agent" })).toBeEnabled();
@@ -330,48 +330,9 @@ describe("Dashboard", () => {
     expect(mockApi.finalizeSession).toHaveBeenCalledTimes(2);
     expect(await screen.findByText("Customer 2 of 3")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "End Session" })).toBeDisabled();
-    expect(screen.getByTestId("transcript-storage")).toHaveTextContent("Saved to Azure Blob Storage");
   });
 
-  it("shows where the transcript was saved and reads it back from storage", async () => {
-    const user = userEvent.setup();
-    const blobName = "2026/11/cust_1/session_0/transcript.json";
-    mockApi.getQueue.mockResolvedValue(queueAt(0));
-    mockApi.startSession.mockResolvedValue(session(0));
-    mockApi.finalizeSession.mockResolvedValue(
-      finalized(0, 1, { outcome: "reported_paid", transcript_ref: blobName, transcript_store: "azure_blob" }),
-    );
-    mockApi.getTranscript.mockResolvedValue({
-      schema_version: "1.0",
-      session_id: "session_0",
-      customer_id: "cust_1",
-      invoice_id: "inv_1",
-      started_at: "2026-11-16T10:00:00Z",
-      ended_at: "2026-11-16T10:02:00Z",
-      session_status: "completed",
-      outcome: "reported_paid",
-      promised_payment_date: null,
-      transcript: [OPENING, turn("user", "I paid this morning.", 2)],
-      summary: "Customer reports payment.",
-    });
-
-    render(<Dashboard />);
-    await user.click(await screen.findByRole("button", { name: "Start Agent" }));
-    await screen.findByText("Listening", { exact: false });
-    await user.click(screen.getByRole("button", { name: "End Session" }));
-
-    const card = await screen.findByRole("region", { name: "Last session" });
-    expect(card).toHaveTextContent("Saved to Azure Blob Storage");
-    expect(card).toHaveTextContent(blobName);
-
-    await user.click(screen.getByRole("button", { name: "View saved transcript" }));
-    expect(mockApi.getTranscript).toHaveBeenCalledWith("session_0");
-    expect(await screen.findByText("I paid this morning.")).toBeInTheDocument();
-    expect(card).toHaveTextContent("Saved transcript · 2 turns");
-    expect(card).toHaveTextContent("Summary: Customer reports payment.");
-  });
-
-  it("shows demo readiness and the demo guide", async () => {
+  it("shows demo readiness and no demo guide", async () => {
     mockApi.getQueue.mockResolvedValue(queueAt(0));
     mockApi.getHealth.mockResolvedValue({ status: "ok", agent_configured: false, transcript_storage: "memory" });
     render(<Dashboard />);
@@ -379,8 +340,7 @@ describe("Dashboard", () => {
     const status = await screen.findByLabelText("System status");
     expect(status).toHaveTextContent("Voice agent: not configured");
     expect(status).toHaveTextContent("Transcripts: in memory only (not persisted)");
-    expect(screen.getByText("How to run the demo")).toBeInTheDocument();
-    expect(screen.getByText(/I can pay the full amount this Friday/)).toBeInTheDocument();
+    expect(screen.queryByText("How to run the demo")).not.toBeInTheDocument();
   });
 
   it("shows the session timer and live review flags, then the flag count after End Session", async () => {
