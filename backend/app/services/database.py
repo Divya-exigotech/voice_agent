@@ -25,9 +25,11 @@ All methods are blocking; async callers run them in a worker thread.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -196,6 +198,20 @@ def _as_uuid(value: str, label: str) -> UUID:
         raise DatabaseError(f"{label} {value!r} is not a UUID") from exc
 
 
+def _single_organization_id(pool: ConnectionPool) -> UUID:
+    """The only organization in the database (startup, when no id is configured)."""
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT id FROM organizations ORDER BY id LIMIT 2").fetchall()
+    if not rows:
+        raise DatabaseError("The database has no organizations; cannot choose one")
+    if len(rows) > 1:
+        raise DatabaseError(
+            "The database has several organizations; set DATABASE_ORGANIZATION_ID to choose one"
+        )
+    logger.info("DATABASE_ORGANIZATION_ID is not set; using the only organization %s", rows[0]["id"])
+    return rows[0]["id"]
+
+
 class PostgresStore:
     """Reads the call queue and records sessions in the existing schema."""
 
@@ -225,8 +241,8 @@ class PostgresStore:
         from psycopg.rows import dict_row
         from psycopg_pool import ConnectionPool
 
-        if settings.database_url is None or settings.database_organization_id is None:
-            raise DatabaseError("DATABASE_URL and DATABASE_ORGANIZATION_ID are required")
+        if settings.database_url is None:
+            raise DatabaseError("DATABASE_URL is required")
         pool = ConnectionPool(
             conninfo=settings.database_url.get_secret_value(),
             min_size=1,
@@ -246,9 +262,14 @@ class PostgresStore:
         except Exception as exc:
             pool.close()
             raise DatabaseError(f"Cannot connect to PostgreSQL: {exc}") from exc
+        try:
+            organization_id = settings.database_organization_id or _single_organization_id(pool)
+        except Exception:
+            pool.close()
+            raise
         return cls(
             pool,
-            organization_id=settings.database_organization_id,
+            organization_id=organization_id,
             statuses=StatusValues.from_settings(settings),
             default_currency=settings.database_default_currency,
             default_language=settings.database_default_language,
@@ -310,9 +331,91 @@ class PostgresStore:
         )
         return customers
 
+    # --- Follow-up calls -------------------------------------------------------------
+
+    def schedule_followup(self, customer_id: str, scheduled_at: datetime) -> UUID | None:
+        """Queue the client's next call task (saved when the previous call ends).
+
+        Returns the new call_tasks.id, or None when the client already has a
+        queued task or no open invoice (nothing to follow up).
+        """
+        s = self._statuses
+        client_id = _as_uuid(customer_id, "customer_id")
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO call_tasks (id, organization_id, client_id, scheduled_at, status)
+                SELECT gen_random_uuid(), %(org)s::uuid, %(client)s::uuid,
+                       %(at)s::timestamptz, %(queued)s::varchar
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM call_tasks
+                    WHERE organization_id = %(org)s AND client_id = %(client)s
+                      AND status = %(queued)s
+                ) AND EXISTS (
+                    SELECT 1 FROM invoices
+                    WHERE organization_id = %(org)s AND client_id = %(client)s
+                      AND status = ANY(%(open_statuses)s) AND amount > 0
+                )
+                RETURNING id
+                """,
+                {
+                    "org": self._org,
+                    "client": client_id,
+                    "at": scheduled_at,
+                    "queued": s.task_queued,
+                    "open_statuses": list(s.invoice_open),
+                },
+            ).fetchone()
+            if row is not None:
+                self._audit(
+                    conn, f"call.followup_scheduled client_id={client_id} task_id={row['id']}",
+                    self._clock(),
+                )
+        return row["id"] if row is not None else None
+
+    def load_followup(self, customer_id: str) -> Customer | None:
+        """The client's queued call task as a Customer, ready to join the queue."""
+        s = self._statuses
+        client_id = _as_uuid(customer_id, "customer_id")
+        with self._pool.connection() as conn:
+            org = conn.execute(
+                "SELECT settings FROM organizations WHERE id = %s", (self._org,)
+            ).fetchone()
+            rows = conn.execute(
+                QUEUE_SQL,
+                {
+                    "org": self._org,
+                    "queued": s.task_queued,
+                    "open_statuses": list(s.invoice_open),
+                },
+            ).fetchall()
+        if org is None:
+            return None
+        currency = organization_currency(org["settings"], self._default_currency)
+        for row in rows:
+            if row["client_id"] != client_id:
+                continue
+            try:
+                customer = customer_from_row(
+                    row, statuses=s, currency=currency, default_language=self._default_language
+                )
+            except ValidationError as exc:
+                logger.warning("Follow-up task %s is not loaded: %s", row["task_id"], exc)
+                return None
+            self._task_by_customer[customer.customer_id] = row["task_id"]
+            return customer
+        return None
+
     # --- Session lifecycle ---------------------------------------------------------
 
     def session_started(self, record: SessionRecord) -> None:
+        started = time.monotonic()
+        try:
+            self._session_started(record)
+        finally:
+            logger.info("latency db_session_start_ms=%d", (time.monotonic() - started) * 1000)
+
+    def _session_started(self, record: SessionRecord) -> None:
         """Claim the call task and create the calls row (one transaction).
 
         Raises DatabaseError if the task was changed outside this app since the
@@ -363,6 +466,13 @@ class PostgresStore:
             self._audit(conn, f"call.session_started call_id={call_id} task_id={task_id}", record.started_at)
 
     def save_session(self, document: TranscriptDocument, transcript_blob: str | None) -> None:
+        started = time.monotonic()
+        try:
+            self._save_session(document, transcript_blob)
+        finally:
+            logger.info("latency db_final_save_ms=%d", (time.monotonic() - started) * 1000)
+
+    def _save_session(self, document: TranscriptDocument, transcript_blob: str | None) -> None:
         """Record the end of a session (one transaction).
 
         Updates calls, replaces the call's transcript turns and outcome action,
@@ -374,6 +484,7 @@ class PostgresStore:
         completed = document.session_status == "completed"
         duration = max(0, round((document.ended_at - document.started_at).total_seconds()))
         with self._pool.connection() as conn:
+            self._lock_call(conn, call_id)
             updated = conn.execute(
                 """
                 UPDATE calls SET status = %s, duration = %s, updated_at = %s
@@ -469,6 +580,37 @@ class PostgresStore:
                 f"outcome={document.outcome.value}",
                 document.ended_at,
             )
+
+    def save_live_transcript(self, session_id: str, turns: Sequence[TranscriptTurn]) -> None:
+        """Write the turns of a running session so far (replaces; idempotent)."""
+        call_id = _as_uuid(session_id, "session_id")
+        with self._pool.connection() as conn:
+            self._lock_call(conn, call_id)
+            # Only while the call is still in progress; the final save owns it after.
+            running = conn.execute(
+                "SELECT 1 FROM calls WHERE id = %s AND organization_id = %s AND status = %s",
+                (call_id, self._org, self._statuses.call_in_progress),
+            ).fetchone()
+            if running is None:
+                return
+            conn.execute("DELETE FROM call_transcripts WHERE call_id = %s", (call_id,))
+            if turns:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO call_transcripts (id, call_id, speaker, "text", "timestamp")
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        [(uuid.uuid4(), call_id, t.speaker, t.text, t.timestamp) for t in turns],
+                    )
+            conn.execute(
+                "UPDATE calls SET updated_at = %s WHERE id = %s", (self._clock(), call_id)
+            )
+
+    @staticmethod
+    def _lock_call(conn: Any, call_id: UUID) -> None:
+        """Serialise live and final writes for one call until the transaction ends."""
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (str(call_id),))
 
     def load_transcript(self, session_id: str) -> TranscriptDocument | None:
         """Rebuild a saved session's transcript document; None if not saved."""
@@ -641,3 +783,51 @@ class PostgresTranscriptStorage:
         # The store is closed by the app, which owns it.
         if self._blob is not None:
             self._blob.close()
+
+
+class LiveTranscriptWriter:
+    """Writes a running session's turns to PostgreSQL without blocking the event loop.
+
+    `notify` is cheap and thread-safe. Each call schedules an async flush that
+    runs the blocking write in a worker thread; flushes for one session are
+    serialised and always write the latest turns, so bursts coalesce.
+    """
+
+    def __init__(
+        self, store: PostgresStore, get_turns: Callable[[str], Sequence[TranscriptTurn]]
+    ) -> None:
+        self._store = store
+        self._get_turns = get_turns
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._pending: set[asyncio.Task[None]] = set()
+
+    def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
+
+    def notify(self, session_id: str) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._schedule, session_id)
+
+    def _schedule(self, session_id: str) -> None:
+        task = asyncio.create_task(self._flush(session_id))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def _flush(self, session_id: str) -> None:
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            try:
+                turns = self._get_turns(session_id)
+                started = time.monotonic()
+                await asyncio.to_thread(self._store.save_live_transcript, session_id, turns)
+                logger.info(
+                    "Live transcript saved for %s (%d turn(s)) latency db_live_write_ms=%d",
+                    session_id, len(turns), (time.monotonic() - started) * 1000,
+                )
+            except Exception:
+                logger.warning("Live transcript write failed for %s", session_id, exc_info=True)
+
+    async def aclose(self) -> None:
+        if self._pending:
+            await asyncio.gather(*self._pending, return_exceptions=True)

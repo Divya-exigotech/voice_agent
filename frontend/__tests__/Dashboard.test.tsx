@@ -216,18 +216,18 @@ describe("Dashboard", () => {
     expect(lastVoice().setMuted).toHaveBeenCalledWith(true);
     expect(screen.getByTestId("mic-state")).toHaveTextContent("Muted");
 
+    const firstCall = lastVoice(); // the next customer's call replaces it after End Session
     await user.click(screen.getByRole("button", { name: "End Session" }));
-    expect(lastVoice().stop).toHaveBeenCalled();
+    expect(firstCall.stop).toHaveBeenCalled();
     expect(mockApi.finalizeSession).toHaveBeenCalledWith("session_0", {
       session_status: "completed",
       transcript: [],
     });
     expect(await screen.findByText("Customer 2 of 3")).toBeInTheDocument();
     expect(screen.getByText("Mira Shah")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Session saved" })).toHaveTextContent("Payment promised");
-    expect(screen.getByTestId("session-status")).toHaveTextContent("Completed");
-    expect(screen.getByTestId("mic-state")).toHaveTextContent("Off");
-    expect(screen.getByRole("button", { name: "Start Agent" })).toBeEnabled();
+    // A recorded payment promise ends the call and starts the next customer by itself.
+    await waitFor(() => expect(mockApi.startSession).toHaveBeenLastCalledWith("cust_2"));
+    expect(mockApi.startSession).toHaveBeenCalledTimes(2);
   });
 
   it("handles a denied microphone and offers a typed conversation instead", async () => {

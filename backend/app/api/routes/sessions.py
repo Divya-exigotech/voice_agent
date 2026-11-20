@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status
 from starlette.concurrency import run_in_threadpool
 
-from app.api.deps import ConversationServiceDep, SessionManagerDep
+from app.api.deps import ConversationServiceDep, FollowUpSchedulerDep, SessionManagerDep
 from app.schemas.session import (
     CreateSessionRequest,
     FinalizeSessionRequest,
@@ -50,6 +50,7 @@ async def finalize_session(
     body: FinalizeSessionRequest,
     manager: SessionManagerDep,
     conversation: ConversationServiceDep,
+    followups: FollowUpSchedulerDep,
 ) -> FinalizeSessionResponse:
     """Save the transcript to storage, then finalize and advance (idempotent)."""
     try:
@@ -69,6 +70,8 @@ async def finalize_session(
     if result.session.status != "active":
         # Session is final: hang up the live voice agent connection.
         await conversation.close(session_id)
+    if not result.already_finalized:
+        followups.schedule(result.session)
     return FinalizeSessionResponse(
         session=result.session,
         queue=manager.queue_state(),

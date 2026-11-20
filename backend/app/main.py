@@ -5,6 +5,7 @@ Run locally with:
 """
 
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -12,14 +13,19 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app.api.routes import api_router
 from app.config import Settings, get_settings
 from app.services.azure_auth import build_async_credential, build_credential
 from app.services.conversation import ConversationService
 from app.services.customer_repository import load_customers
-from app.services.database import PostgresStore, PostgresTranscriptStorage
+from app.services.database import (
+    LiveTranscriptWriter,
+    PostgresStore,
+    PostgresTranscriptStorage,
+)
+from app.services.followup import FollowUpScheduler
 from app.services.session_manager import SessionManager
 from app.services.transcript_storage import (
     BlobTranscriptStorage,
@@ -118,6 +124,13 @@ def create_app(
     )
     business_tz = ZoneInfo(settings.business_timezone)
     manager = SessionManager(customers, transcript_storage, **manager_options)
+    live_writer: LiveTranscriptWriter | None = None
+    if db is not None:
+        # Turns are saved to call_transcripts as they happen, not only at the end.
+        live_writer = LiveTranscriptWriter(
+            db, lambda sid: manager.get_conversation(sid).turns
+        )
+        manager.on_turns_changed = live_writer.notify
     conversation = ConversationService(
         manager,
         agent_connector,  # type: ignore[arg-type]
@@ -126,9 +139,18 @@ def create_app(
         timeout_seconds=settings.azure_ai_agent_timeout_seconds,
     )
 
+    followups = FollowUpScheduler(
+        manager, db, delay_seconds=settings.followup_delay_seconds
+    )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if live_writer is not None:
+            live_writer.start()
         yield
+        await followups.aclose()
+        if live_writer is not None:
+            await live_writer.aclose()
         await conversation.close_all()
         if agent_connector is not None:
             await agent_connector.aclose()  # type: ignore[union-attr]
@@ -140,7 +162,19 @@ def create_app(
     app.state.settings = settings
     app.state.session_manager = manager
     app.state.conversation_service = conversation
+    app.state.followup_scheduler = followups
     app.include_router(api_router)
+
+    @app.middleware("http")
+    async def log_request_latency(request: Request, call_next: Callable[[Request], Any]) -> Any:
+        started = time.monotonic()
+        response = await call_next(request)
+        logger.info(
+            "latency http_ms=%d %s %s -> %d",
+            (time.monotonic() - started) * 1000,
+            request.method, request.url.path, response.status_code,
+        )
+        return response
 
     # /api/health is reachable through the Next.js /api proxy for the dashboard.
     @app.get("/health", tags=["health"])

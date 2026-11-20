@@ -58,13 +58,18 @@ class Settings(BaseSettings):
     # Used to resolve "today" for promised-payment-date validation.
     business_timezone: str = "Asia/Kolkata"
 
+    # Seconds between a call that ended with a payment promise and the customer's
+    # next call becoming ready in the queue (0 turns follow-up calls off).
+    followup_delay_seconds: int = Field(default=180, ge=0)
+
     # --- Existing PostgreSQL database ------------------------------------------
     # When set, the database replaces customers.json: the queue is read from
     # call_tasks/clients/invoices, and sessions, outcomes and transcript turns
     # are written to calls/call_events/call_actions/call_transcripts.
     # e.g. postgresql://user:password@host:5432/dbname?sslmode=require
     database_url: SecretStr | None = None
-    # Every query is scoped to this organization (organizations.id).
+    # Every query is scoped to this organization (organizations.id). Optional:
+    # when unset and the database holds exactly one organization, that one is used.
     database_organization_id: UUID | None = None
     # Schema holding the tables (search_path).
     database_schema: str = Field(default="public", pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
@@ -105,12 +110,6 @@ class Settings(BaseSettings):
         if not value:
             raise ValueError("at least one open invoice status is required")
         return value
-
-    @model_validator(mode="after")
-    def _database_needs_organization(self) -> "Settings":
-        if self.database_url is not None and self.database_organization_id is None:
-            raise ValueError("DATABASE_ORGANIZATION_ID is required when DATABASE_URL is set")
-        return self
 
     @model_validator(mode="after")
     def _client_secret_needs_ids(self) -> "Settings":
