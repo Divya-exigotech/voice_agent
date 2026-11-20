@@ -140,9 +140,12 @@ def test_organization_currency(org_settings: Any, expected: str) -> None:
 # --- Settings ------------------------------------------------------------------------
 
 
-def test_database_url_requires_organization() -> None:
-    with pytest.raises(ValidationError, match="DATABASE_ORGANIZATION_ID"):
-        isolated_settings(database_url="postgresql://u:p@localhost/db", database_organization_id=None)
+def test_database_url_does_not_require_organization() -> None:
+    settings = isolated_settings(
+        database_url="postgresql://u:p@localhost/db", database_organization_id=None
+    )
+    assert settings.database_configured
+    assert settings.database_organization_id is None
 
 
 def test_open_invoice_statuses_must_not_be_empty() -> None:

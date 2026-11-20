@@ -88,6 +88,10 @@ class CustomerQueue:
             self._index += 1
         return advance
 
+    def append(self, customer: Customer) -> None:
+        """Add ``customer`` at the end of the queue (called after everyone else)."""
+        self._customers = (*self._customers, customer)
+
     def reset(self) -> None:
         if self._active_session_id is not None:
             raise SessionAlreadyActiveError("Cannot reset while a session is active")

@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import pytest
@@ -279,3 +280,32 @@ def test_blob_storage_is_used_when_account_url_is_set(customers_file: Path) -> N
 
 def test_health_is_reachable_under_api_prefix(client: TestClient) -> None:
     assert client.get("/api/health").json() == client.get("/health").json()
+
+
+def test_payment_promise_requeues_customer_after_everyone_else(
+    customers_file: Path, fake_agent
+) -> None:
+    app = create_app(
+        isolated_settings(customers_json_path=customers_file, followup_delay_seconds=1),
+        connector=fake_agent,
+    )
+    with TestClient(app) as client:
+        session = client.post("/api/sessions").json()
+        finalize(
+            client,
+            session["session_id"],
+            outcome="payment_promised",
+            promised_payment_date="2026-11-20",
+        )
+        time.sleep(1.5)
+        queue = client.get("/api/queue").json()
+        # The follow-up waits at the end; the other customers are called first.
+        assert queue["total"] == 4
+        assert queue["current_customer"]["customer_id"] == SAMPLE_ORDER[1]
+        for expected in SAMPLE_ORDER[1:]:
+            created = client.post("/api/sessions").json()
+            assert created["customer_id"] == expected
+            finalize(client, created["session_id"])
+        queue = client.get("/api/queue").json()
+        assert queue["current_customer"]["customer_id"] == SAMPLE_ORDER[0]
+        assert client.post("/api/sessions").json()["customer_id"] == SAMPLE_ORDER[0]

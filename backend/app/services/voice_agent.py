@@ -22,10 +22,13 @@ import base64
 import contextlib
 import json
 import logging
+import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from typing import Any, Protocol
+
+from app.services.agent_prompt import RECORD_OUTCOME_TOOL, RECORD_OUTCOME_TOOL_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,10 @@ MAX_TOOL_ROUNDS = 3
 MAX_EMPTY_RETRIES = 2
 EMPTY_REPLY_RETRY_SECONDS = 2.0
 
+AGENT_TRANSCRIPT_DELTA_EVENTS = (
+    "response.output_audio_transcript.delta",
+    "response.output_text.delta",
+)
 AGENT_TRANSCRIPT_EVENTS = ("response.output_audio_transcript.done", "response.output_text.done")
 
 
@@ -116,6 +123,9 @@ class LiveAgentSession:
         # item_id -> when the user's speech was committed (for turn ordering)
         self._speech_committed_at: dict[str, datetime] = {}
         self._closing = False
+        # time.monotonic() when the customer stopped speaking; cleared at the
+        # agent's first audio (voice reply latency).
+        self._speech_stopped_at: float | None = None
 
         self._cm: AbstractAsyncContextManager[Any] | None = None
         self._conn: Any = None
@@ -124,6 +134,7 @@ class LiveAgentSession:
         self._lock = asyncio.Lock()
         self._pending: asyncio.Future[str] | None = None
         self._response_text: list[str] = []
+        self._transcript_deltas: list[str] = []
         self._reply_parts: list[str] = []
         self._tool_rounds = 0
         self._closed = False
@@ -175,6 +186,20 @@ class LiveAgentSession:
             raise AgentError(reason or "The voice agent session closed during start-up")
 
         try:
+            if RECORD_OUTCOME_TOOL_NAME not in (self.session_info.get("tools") or []):
+                # The Foundry agent has no outcome tool: send it with this session
+                # so payment promises and other outcomes are still recorded.
+                logger.info("Agent has no %s tool; sending it with the session", RECORD_OUTCOME_TOOL_NAME)
+                await self._send(
+                    {
+                        "type": "session.update",
+                        "session": {
+                            "type": "realtime",
+                            "tools": [RECORD_OUTCOME_TOOL],
+                            "tool_choice": "auto",
+                        },
+                    }
+                )
             await self._send(
                 {
                     "type": "conversation.item.create",
@@ -323,18 +348,31 @@ class LiveAgentSession:
             self.session_info = summarize_session(session)
             self._ready.set()
         elif kind == "response.output_audio.delta":
+            if self._speech_stopped_at is not None:
+                logger.info(
+                    "latency voice_reply_ms=%d (customer stopped speaking -> first agent audio)",
+                    (time.monotonic() - self._speech_stopped_at) * 1000,
+                )
+                self._speech_stopped_at = None
             try:
                 self._emit(audio_bytes(event_value(event, "delta")))
             except (AgentError, ValueError) as exc:  # skip one bad chunk, keep the call alive
                 logger.warning("Dropping agent audio chunk: %s", exc)
+        elif kind in AGENT_TRANSCRIPT_DELTA_EVENTS:
+            delta = event_value(event, "delta")
+            if isinstance(delta, str):
+                self._transcript_deltas.append(delta)
         elif kind in AGENT_TRANSCRIPT_EVENTS:
+            self._transcript_deltas = []  # the final text supersedes the partial deltas
             text = (event_value(event, "transcript") or event_value(event, "text") or "").strip()
             if text and (not self._response_text or self._response_text[-1] != text):
                 self._response_text.append(text)
         elif kind == "input_audio_buffer.speech_started":
             # Barge-in: the browser drops queued agent audio.
+            self._speech_stopped_at = None
             self._emit({"type": "speech_started"})
         elif kind == "input_audio_buffer.speech_stopped":
+            self._speech_stopped_at = time.monotonic()
             self._emit({"type": "speech_stopped"})
         elif kind == "input_audio_buffer.committed":
             item_id = event_value(event, "item_id")
@@ -370,6 +408,11 @@ class LiveAgentSession:
 
     async def _on_response_done(self, response: Any) -> None:
         texts, self._response_text = self._response_text, []
+        # An interrupted (barge-in) response never sends a final transcript, so
+        # keep what the customer actually heard instead of dropping it.
+        partial, self._transcript_deltas = "".join(self._transcript_deltas).strip(), []
+        if not texts and partial:
+            texts = [partial]
         status = str(event_value(response, "status") or "completed")
         if status == "failed":
             details = event_value(response, "status_details")

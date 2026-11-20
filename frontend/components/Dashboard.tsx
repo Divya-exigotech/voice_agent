@@ -30,6 +30,17 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// After a payment promise is recorded, wait this long in silence (the agent may
+// still be saying goodbye) before the call is ended automatically.
+const AUTO_END_GRACE_MS = 4000;
+// The backend queues the follow-up call after its delay; poll for it this often.
+// Outcomes that end the call by themselves and start the next customer's call.
+const AUTO_OUTCOMES = ["payment_promised", "reported_paid", "needs_human_review"];
+
+const FOLLOWUP_POLL_MS = 1000;
+// Stop waiting for a follow-up call after this long.
+const FOLLOWUP_MAX_WAIT_MS = 10 * 60 * 1000;
+
 const SILENT: AudioState = { muted: false, userSpeaking: false, agentSpeaking: false };
 
 export function Dashboard() {
@@ -53,11 +64,18 @@ export function Dashboard() {
   // The last End Session could not save the transcript; the button becomes "Retry save".
   const [saveFailed, setSaveFailed] = useState(false);
   const [last, setLast] = useState<LastSession | null>(null);
+  // A payment promise was recorded: that customer is called again, but only after
+  // every other queued customer, once the backend adds the follow-up to the queue.
+  const [followUpsPending, setFollowUpsPending] = useState(false);
+  const [autoNext, setAutoNext] = useState(false);
   // Guards against duplicate End Session events while a finalize is in flight.
   const finalizing = useRef(false);
   // The session agent replies belong to; late events for an ended session are ignored.
   const currentSession = useRef<string | null>(null);
   const voice = useRef<VoiceSession | null>(null);
+  // Always the latest handlers, for timers that outlive a render.
+  const endHandler = useRef<() => Promise<void>>(async () => {});
+  const startHandler = useRef<() => Promise<void>>(async () => {});
 
   const applyQueue = useCallback((q: QueueState) => {
     setQueue(q);
@@ -109,6 +127,63 @@ export function Dashboard() {
   const showTranscript = sessionId !== null || busy;
   const canChat = sessionId !== null && !busy;
 
+  const outcomeRecorded =
+    !!proposal &&
+    AUTO_OUTCOMES.includes(proposal.outcome) &&
+    (proposal.outcome !== "payment_promised" || !!proposal.promised_payment_date);
+
+  useEffect(() => {
+    endHandler.current = handleEnd;
+    startHandler.current = handleStart;
+  });
+
+  // End the voice call by itself once a payment date is recorded and the
+  // conversation has gone quiet (the customer and the agent both finished).
+  useEffect(() => {
+    if (!outcomeRecorded || mode !== "voice" || status !== "active") return;
+    if (audio.userSpeaking || audio.agentSpeaking) return;
+    const timer = setTimeout(() => void endHandler.current(), AUTO_END_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [outcomeRecorded, mode, status, audio.userSpeaking, audio.agentSpeaking]);
+
+  // Every other customer is done: wait for the backend to queue the follow-up calls.
+  const waitingForFollowUps =
+    followUpsPending && !!queue?.completed && sessionId === null && !busy;
+  useEffect(() => {
+    if (!waitingForFollowUps) return;
+    let cancelled = false;
+    let inFlight = false;
+    const deadline = Date.now() + FOLLOWUP_MAX_WAIT_MS;
+    const timer = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const q = await api.getQueue();
+        if (cancelled) return;
+        if (q.current_customer && !q.active_session_id) {
+          setQueue(q);
+          setAutoNext(true);
+        } else if (Date.now() > deadline) {
+          setFollowUpsPending(false);
+        }
+      } catch {
+        // keep polling; the next tick retries
+      } finally {
+        inFlight = false;
+      }
+    }, FOLLOWUP_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [waitingForFollowUps]);
+
+  // Start the follow-up call as soon as the queue shows it and nothing is running.
+  useEffect(() => {
+    if (!autoNext || !canStart) return;
+    void startHandler.current(); // resetForNewSession clears autoNext
+  }, [autoNext, canStart]);
+
   function applyTranscript(sid: string, update: TranscriptUpdate) {
     if (currentSession.current !== sid) return;
     setTurns(update.transcript);
@@ -155,6 +230,7 @@ export function Dashboard() {
   }
 
   function resetForNewSession() {
+    setAutoNext(false);
     setError(null);
     setMicProblem(false);
     setVoiceLost(false);
@@ -239,6 +315,7 @@ export function Dashboard() {
     if (!sessionId || !queue || finalizing.current) return;
     finalizing.current = true;
     const endedCustomer = customer;
+    const wasVoice = mode === "voice";
     const sessionStatus = voiceLost ? "failed" : "completed";
     setStatus("ending");
     setError(null);
@@ -263,6 +340,11 @@ export function Dashboard() {
       setVoiceLost(false);
       setSaveFailed(false);
       setStatus(sessionStatus === "failed" ? "failed" : "completed");
+      const outcome = result.session.outcome;
+      if (wasVoice && sessionStatus === "completed" && outcome && AUTO_OUTCOMES.includes(outcome)) {
+        setAutoNext(true); // start the next customer's call by itself
+        if (outcome === "payment_promised") setFollowUpsPending(true); // called again last
+      }
       if (sessionStatus === "failed") {
         setError("Session saved as failed. The same customer stays current so it can be retried.");
       }
@@ -308,6 +390,12 @@ export function Dashboard() {
         <SystemStatus health={health} error={healthError} />
         <SequenceProgress queue={queue} />
       </div>
+      {waitingForFollowUps && (
+        <p className="muted" role="status">
+          All customers have been called. Customers who promised a payment date are called again
+          automatically in a few minutes.
+        </p>
+      )}
       {last && !sessionId && <SessionSavedNotice key={last.session.session_id} last={last} />}
       <div className={`grid agent-grid${showTranscript ? " agent-live" : " agent-idle"}`}>
         <div className="column">

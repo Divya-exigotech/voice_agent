@@ -1,6 +1,7 @@
 """Coordinates the customer queue, session metadata and transcript storage."""
 
 import bisect
+import logging
 import threading
 import uuid
 from collections.abc import Callable, Sequence
@@ -21,6 +22,8 @@ from app.schemas.session import (
 )
 from app.services.customer_queue import CustomerQueue, QueueError
 from app.services.transcript_storage import TranscriptStorage
+
+logger = logging.getLogger(__name__)
 
 
 class SessionNotFoundError(Exception):
@@ -87,7 +90,10 @@ class SessionManager:
         id_factory: Callable[[], str] = _new_session_id,
         on_session_start: Callable[[SessionRecord], None] | None = None,
         allow_reset: bool = True,
+        on_turns_changed: Callable[[str], None] | None = None,
     ) -> None:
+        # Non-blocking notification after a turn is added (live persistence).
+        self.on_turns_changed = on_turns_changed
         # on_session_start persists a new session before it is handed out
         # (blocking I/O); if it raises, the session is not started.
         self._on_session_start = on_session_start
@@ -203,7 +209,13 @@ class SessionManager:
             )
             for number in range(index, len(turns)):
                 turns[number] = turns[number].model_copy(update={"turn": number + 1})
-            return turns[index]
+            added = turns[index]
+        if self.on_turns_changed is not None:
+            try:
+                self.on_turns_changed(session_id)
+            except Exception:  # live persistence must never break the conversation
+                logger.exception("Turn change hook failed for session %s", session_id)
+        return added
 
     def set_proposed_outcome(self, session_id: str, proposal: OutcomeProposal) -> None:
         with self._lock:
@@ -319,6 +331,16 @@ class SessionManager:
             summary=summary,
             review_flags=list(self._flags.get(session_id, ())),
         )
+
+    def requeue_customer(self, customer: Customer) -> None:
+        """Add a customer to the end of the queue (follow-up call, after everyone else)."""
+        with self._lock:
+            self._customers_by_id[customer.customer_id] = customer
+            self._queue.append(customer)
+
+    def customer(self, customer_id: str) -> Customer | None:
+        with self._lock:
+            return self._customers_by_id.get(customer_id)
 
     def reset_queue(self) -> QueueState:
         if not self._allow_reset:
