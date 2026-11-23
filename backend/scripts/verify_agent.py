@@ -40,18 +40,22 @@ async def main(say: str | None) -> int:
         print("\n[FAIL] Set AZURE_AI_PROJECT_ENDPOINT and AZURE_AI_AGENT_NAME in .env")
         return 1
 
-    customer = load_customers(settings.customers_json_path)[0]
+    customer = (await load_customers(settings.customers_json_path))[0]
     today = datetime.now(ZoneInfo(settings.business_timezone)).date()
     transcript: list[str] = []
     tool_calls: list[str] = []
 
-    def on_turn(speaker: str, text: str, _at: datetime | None = None) -> None:
+    async def on_turn(speaker: str, text: str, _at: datetime | None = None) -> None:
         transcript.append(f"{speaker}: {text}")
         print(f"  {'Agent' if speaker == 'agent' else 'User '}: {text}")
 
-    def on_tool_call(name: str, arguments: str) -> str:
-        result = validate_outcome_arguments(arguments, today=today, now=datetime.now(UTC))
-        tool_calls.append(f"{name}({arguments}) -> {'valid' if result.ok else result.error}")
+    async def on_tool_call(name: str, arguments: str) -> str:
+        result = validate_outcome_arguments(
+            arguments, today=today, now=datetime.now(UTC)
+        )
+        tool_calls.append(
+            f"{name}({arguments}) -> {'valid' if result.ok else result.error}"
+        )
         return json.dumps({"recorded": result.ok, "error": result.error})
 
     connector = FoundryAgentConnector(
@@ -62,7 +66,9 @@ async def main(say: str | None) -> int:
     session = LiveAgentSession(
         connector.connect,
         context=build_session_context(
-            customer=customer, today=today, organization=settings.agent_organization_name
+            customer=customer,
+            today=today,
+            organization=settings.agent_organization_name,
         ),
         on_turn=on_turn,
         on_tool_call=on_tool_call,
@@ -109,9 +115,13 @@ async def main(say: str | None) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--say", help="Optional customer reply to send after the opening line")
     parser.add_argument(
-        "--print-tool", action="store_true", help="Print the record_outcome tool JSON and exit"
+        "--say", help="Optional customer reply to send after the opening line"
+    )
+    parser.add_argument(
+        "--print-tool",
+        action="store_true",
+        help="Print the record_outcome tool JSON and exit",
     )
     args = parser.parse_args()
     if args.print_tool:

@@ -96,7 +96,9 @@ class SessionRecord(BaseModel):
     session_id: str
     customer_id: str
     invoice_id: str
-    sequence_index: int = Field(description="0-based position of the customer in the JSON file")
+    sequence_index: int = Field(
+        description="0-based position of the customer in the JSON file"
+    )
     status: SessionStatus
     started_at: datetime
     ended_at: datetime | None = None
@@ -107,7 +109,8 @@ class SessionRecord(BaseModel):
         description="Storage reference of the saved transcript (blob name for Azure Blob)",
     )
     transcript_store: str | None = Field(
-        default=None, description='Where the transcript was saved: "azure_blob" or "memory"'
+        default=None,
+        description='Where the transcript was saved: "azure_blob" or "memory"',
     )
     review_flag_count: int = 0
 
@@ -132,8 +135,12 @@ class TranscriptDocument(BaseModel):
 
 class QueueState(BaseModel):
     total: int
-    current_index: int = Field(description="0-based; equals total once every record is processed")
-    position: int | None = Field(description="1-based position for display; null when completed")
+    current_index: int = Field(
+        description="0-based; equals total once every record is processed"
+    )
+    position: int | None = Field(
+        description="1-based position for display; null when completed"
+    )
     remaining: int
     completed: bool
     current_customer: Customer | None

@@ -8,3 +8,9 @@ requires-python = ">=3.11"
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.ruff]
+# Resolve first-party imports (app, tests, scripts) the same way wherever ruff runs
+# from (backend/ or the repo root, e.g. an editor opened on the whole repo).
+src = ["."]

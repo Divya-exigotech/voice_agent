@@ -22,7 +22,9 @@ class Client(UUIDPrimaryKey, Timestamps, Base):
     language: Mapped[str | None] = mapped_column(String(50))
 
     __table_args__ = (
-        UniqueConstraint("organization_id", "external_client_id", name="uq_clients_org_external"),
+        UniqueConstraint(
+            "organization_id", "external_client_id", name="uq_clients_org_external"
+        ),
     )
 
 
@@ -38,8 +40,12 @@ class Invoice(UUIDPrimaryKey, Timestamps, Base):
     external_invoice_id: Mapped[str] = mapped_column(String(100), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     due_date: Mapped[date] = mapped_column(Date, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="pending")
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="pending"
+    )
 
     __table_args__ = (
-        UniqueConstraint("organization_id", "external_invoice_id", name="uq_invoices_org_external"),
+        UniqueConstraint(
+            "organization_id", "external_invoice_id", name="uq_invoices_org_external"
+        ),
     )

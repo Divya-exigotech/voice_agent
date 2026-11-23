@@ -17,22 +17,43 @@ from app.services.voice_agent import (
     summarize_session,
 )
 
-from .conftest import FakeConnector, agent_audio, agent_calls_tool, agent_says, user_speaks
+from .conftest import (
+    FakeConnector,
+    agent_audio,
+    agent_calls_tool,
+    agent_says,
+    user_speaks,
+)
 
 
-def recorded(*_args) -> str:
+async def recorded(*_args) -> str:
     return json.dumps({"recorded": True})
 
 
-async def open_session(connector: FakeConnector, *, on_tool_call=recorded, turns=None, events=None, times=None):
+async def open_session(
+    connector: FakeConnector,
+    *,
+    on_tool_call=recorded,
+    turns=None,
+    events=None,
+    times=None,
+):
     turns = turns if turns is not None else []
     times = times if times is not None else []
+
+    async def on_turn(speaker, text, at):
+        turns.append((speaker, text))
+        times.append(at)
+
+    async def on_event(event):
+        events.append(event)
+
     session = LiveAgentSession(
         connector.connect,
         context="CONTEXT",
-        on_turn=lambda speaker, text, at: (turns.append((speaker, text)), times.append(at)),
+        on_turn=on_turn,
         on_tool_call=on_tool_call,
-        on_event=None if events is None else events.append,
+        on_event=None if events is None else on_event,
         timeout_seconds=1.0,
     )
     await session.start()
@@ -49,7 +70,11 @@ def test_start_injects_context_as_system_message() -> None:
     session, conn = asyncio.run(scenario())
     assert conn.sent[0] == {
         "type": "conversation.item.create",
-        "item": {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "CONTEXT"}]},
+        "item": {
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "input_text", "text": "CONTEXT"}],
+        },
     }
     assert session.conversation_id == "conv_1"
     assert session.session_info["tools"] == ["record_outcome"]
@@ -58,7 +83,9 @@ def test_start_injects_context_as_system_message() -> None:
 
 def test_opening_and_typed_reply() -> None:
     async def scenario():
-        connector = FakeConnector([agent_says("Hello."), agent_says("When can you pay?")])
+        connector = FakeConnector(
+            [agent_says("Hello."), agent_says("When can you pay?")]
+        )
         session, turns = await open_session(connector)
         opening = await session.request_reply(None)
         reply = await session.request_reply("Not yet")
@@ -93,12 +120,22 @@ def test_duplicate_text_and_audio_transcripts_are_merged() -> None:
 
 
 def test_falls_back_to_response_output_message_text() -> None:
-    events = [{
-        "type": "response.done",
-        "response": {"status": "completed", "output": [
-            {"type": "message", "content": [{"type": "output_audio", "transcript": "From output."}]}
-        ]},
-    }]
+    events = [
+        {
+            "type": "response.done",
+            "response": {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_audio", "transcript": "From output."}
+                        ],
+                    }
+                ],
+            },
+        }
+    ]
 
     async def scenario():
         session, _ = await open_session(FakeConnector([events]))
@@ -112,15 +149,17 @@ def test_falls_back_to_response_output_message_text() -> None:
 def test_tool_call_round_trip() -> None:
     calls = []
 
-    def handler(name, args):
+    async def handler(name, args):
         calls.append((name, json.loads(args)))
         return json.dumps({"recorded": True})
 
     async def scenario():
-        connector = FakeConnector([
-            agent_calls_tool({"outcome": "reported_paid"}, call_id="call_9"),
-            agent_says("Thanks, noted."),
-        ])
+        connector = FakeConnector(
+            [
+                agent_calls_tool({"outcome": "reported_paid"}, call_id="call_9"),
+                agent_says("Thanks, noted."),
+            ]
+        )
         session, turns = await open_session(connector, on_tool_call=handler)
         reply = await session.request_reply("I paid already")
         await session.close()
@@ -130,18 +169,24 @@ def test_tool_call_round_trip() -> None:
     assert reply == "Thanks, noted."
     assert calls == [("record_outcome", {"outcome": "reported_paid"})]
     assert conn.items("function_call_output") == [
-        {"type": "function_call_output", "call_id": "call_9", "output": '{"recorded": true}'}
+        {
+            "type": "function_call_output",
+            "call_id": "call_9",
+            "output": '{"recorded": true}',
+        }
     ]
     assert conn.creates == 2  # follow-up response requested after the tool output
     assert turns == [("agent", "Thanks, noted.")]
 
 
 def test_tool_handler_exception_is_returned_to_agent() -> None:
-    def boom(name, args):
+    async def boom(name, args):
         raise RuntimeError("db down")
 
     async def scenario():
-        connector = FakeConnector([agent_calls_tool({"outcome": "reported_paid"}), agent_says("OK.")])
+        connector = FakeConnector(
+            [agent_calls_tool({"outcome": "reported_paid"}), agent_says("OK.")]
+        )
         session, _ = await open_session(connector, on_tool_call=boom)
         reply = await session.request_reply("hi")
         await session.close()
@@ -155,7 +200,9 @@ def test_tool_handler_exception_is_returned_to_agent() -> None:
 
 def test_endless_tool_calls_are_bounded() -> None:
     async def scenario():
-        connector = FakeConnector([agent_calls_tool({}, call_id=f"c{i}") for i in range(10)])
+        connector = FakeConnector(
+            [agent_calls_tool({}, call_id=f"c{i}") for i in range(10)]
+        )
         session, _ = await open_session(connector)
         try:
             await session.request_reply("hi")
@@ -171,7 +218,10 @@ def test_user_audio_transcription_becomes_user_turn() -> None:
         connector = FakeConnector()
         session, turns = await open_session(connector)
         await connector.connections[0].emit(
-            {"type": "conversation.item.input_audio_transcription.completed", "transcript": " I paid "}
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": " I paid ",
+            }
         )
         await asyncio.sleep(0.05)
         await session.close()
@@ -184,7 +234,15 @@ def test_user_audio_transcription_becomes_user_turn() -> None:
     ("events", "message"),
     [
         ([{"type": "error", "error": {"message": "rate limited"}}], "rate limited"),
-        ([{"type": "response.done", "response": {"status": "failed", "status_details": "quota"}}], "failed"),
+        (
+            [
+                {
+                    "type": "response.done",
+                    "response": {"status": "failed", "status_details": "quota"},
+                }
+            ],
+            "failed",
+        ),
         ([ConnectionResetError("socket closed")], "socket closed"),
         ([], "did not respond"),
     ],
@@ -219,7 +277,10 @@ def test_connection_drop_closes_session() -> None:
 @pytest.mark.parametrize(
     ("configure", "message"),
     [
-        (lambda c: setattr(c, "fail_connect", PermissionError("401 Unauthorized")), "Could not connect"),
+        (
+            lambda c: setattr(c, "fail_connect", PermissionError("401 Unauthorized")),
+            "Could not connect",
+        ),
         (lambda c: setattr(c, "emit_session_created", False), "Timed out waiting"),
     ],
     ids=["auth-failure", "no-session-created"],
@@ -237,10 +298,16 @@ def test_voice_audio_in_and_out() -> None:
     async def scenario():
         connector = FakeConnector()
         connector.audio_script = [
-            [*user_speaks("I will pay on Friday"), agent_audio(b"\x05\x00"), *agent_says("Thank you.")]
+            [
+                *user_speaks("I will pay on Friday"),
+                agent_audio(b"\x05\x00"),
+                *agent_says("Thank you."),
+            ]
         ]
         events, turns, times = [], [], []
-        session, _ = await open_session(connector, events=events, turns=turns, times=times)
+        session, _ = await open_session(
+            connector, events=events, turns=turns, times=times
+        )
         await session.append_audio(b"\x00\x01" * 10)
         await asyncio.sleep(0.05)
         await session.close()
@@ -262,11 +329,17 @@ def test_late_user_transcription_keeps_commit_time() -> None:
 
     async def scenario():
         connector = FakeConnector()
-        connector.audio_script = [[
-            {"type": "input_audio_buffer.committed", "item_id": "u1"},
-            *agent_says("Sure."),
-            {"type": "conversation.item.input_audio_transcription.completed", "item_id": "u1", "transcript": "Call me later"},
-        ]]
+        connector.audio_script = [
+            [
+                {"type": "input_audio_buffer.committed", "item_id": "u1"},
+                *agent_says("Sure."),
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "u1",
+                    "transcript": "Call me later",
+                },
+            ]
+        ]
         turns, times = [], []
         session, _ = await open_session(connector, turns=turns, times=times)
         await session.append_audio(b"\x00\x00")
@@ -297,7 +370,10 @@ def test_tool_round_limit_resets_between_voice_responses() -> None:
         connector = FakeConnector()
         # Four separate voice exchanges, each with one tool call then a reply.
         connector.script = [agent_says(f"Reply {i}.") for i in range(4)]
-        connector.audio_script = [agent_calls_tool({"outcome": "reported_paid"}, call_id=f"c{i}") for i in range(4)]
+        connector.audio_script = [
+            agent_calls_tool({"outcome": "reported_paid"}, call_id=f"c{i}")
+            for i in range(4)
+        ]
         turns = []
         session, _ = await open_session(connector, turns=turns)
         for _ in range(4):
@@ -338,7 +414,11 @@ def test_requested_close_does_not_notify_listener() -> None:
         await session.close()
         return events
 
-    assert all(e.get("type") != "agent_closed" for e in asyncio.run(scenario()) if isinstance(e, dict))
+    assert all(
+        e.get("type") != "agent_closed"
+        for e in asyncio.run(scenario())
+        if isinstance(e, dict)
+    )
 
 
 def test_bad_audio_chunk_is_dropped_without_killing_session() -> None:
@@ -346,7 +426,9 @@ def test_bad_audio_chunk_is_dropped_without_killing_session() -> None:
         connector = FakeConnector()
         events = []
         session, _ = await open_session(connector, events=events)
-        await connector.connections[0].emit({"type": "response.output_audio.delta", "delta": 123})
+        await connector.connections[0].emit(
+            {"type": "response.output_audio.delta", "delta": 123}
+        )
         await asyncio.sleep(0.05)
         is_open = session.is_open
         await session.close()
@@ -366,13 +448,17 @@ def test_event_helpers_handle_typed_and_mapping_events() -> None:
     class Kind(str, enum.Enum):
         DONE = "response.done"
 
-    typed = SimpleNamespace(type=Kind.DONE, response=SimpleNamespace(status="completed"))
+    typed = SimpleNamespace(
+        type=Kind.DONE, response=SimpleNamespace(status="completed")
+    )
     assert event_type(typed) == "response.done"
     assert event_value(typed, "response").status == "completed"
     assert event_type({"type": "error"}) == "error"
     assert event_value(None, "x") is None
     assert summarize_session(None) == {}
-    assert summarize_session({"model": "m", "modalities": ["audio"], "tools": [SimpleNamespace(name="t")]}) == {
+    assert summarize_session(
+        {"model": "m", "modalities": ["audio"], "tools": [SimpleNamespace(name="t")]}
+    ) == {
         "model": "m",
         "output_modalities": ["audio"],
         "tools": ["t"],
@@ -477,17 +563,26 @@ def test_voice_opening_not_requested_when_agent_already_greeted() -> None:
 def cancelled_response(reason: str = "turn_detected") -> list:
     return [
         {"type": "response.created"},
-        {"type": "response.done", "response": {"status": "cancelled", "status_details": {"type": "cancelled", "reason": reason}, "output": []}},
+        {
+            "type": "response.done",
+            "response": {
+                "status": "cancelled",
+                "status_details": {"type": "cancelled", "reason": reason},
+                "output": [],
+            },
+        },
     ]
 
 
 def test_typed_reply_waits_past_a_cancelled_response(monkeypatch) -> None:
-    import app.services.voice_agent as voice_agent
+    from app.services import voice_agent
 
     monkeypatch.setattr(voice_agent, "EMPTY_REPLY_RETRY_SECONDS", 0.01)
 
     async def scenario():
-        connector = FakeConnector([cancelled_response(), agent_says("When can you pay?")])
+        connector = FakeConnector(
+            [cancelled_response(), agent_says("When can you pay?")]
+        )
         session, _ = await open_session(connector)
         reply = await session.request_reply("Hello?")
         await session.close()
@@ -498,13 +593,23 @@ def test_typed_reply_waits_past_a_cancelled_response(monkeypatch) -> None:
     assert conn.creates == 2  # asked again after the cancelled response
 
 
-def test_cancelled_response_followed_by_agent_answer_is_not_requested_again(monkeypatch) -> None:
-    import app.services.voice_agent as voice_agent
+def test_cancelled_response_followed_by_agent_answer_is_not_requested_again(
+    monkeypatch,
+) -> None:
+    from app.services import voice_agent
 
     monkeypatch.setattr(voice_agent, "EMPTY_REPLY_RETRY_SECONDS", 0.2)
 
     async def scenario():
-        connector = FakeConnector([[*cancelled_response(), {"type": "response.created"}, *agent_says("Sorry, go ahead.")]])
+        connector = FakeConnector(
+            [
+                [
+                    *cancelled_response(),
+                    {"type": "response.created"},
+                    *agent_says("Sorry, go ahead."),
+                ]
+            ]
+        )
         session, _ = await open_session(connector)
         reply = await session.request_reply("Hello?")
         await asyncio.sleep(0.3)
@@ -517,7 +622,7 @@ def test_cancelled_response_followed_by_agent_answer_is_not_requested_again(monk
 
 
 def test_repeatedly_empty_responses_fail_with_reason(monkeypatch) -> None:
-    import app.services.voice_agent as voice_agent
+    from app.services import voice_agent
 
     monkeypatch.setattr(voice_agent, "EMPTY_REPLY_RETRY_SECONDS", 0.01)
 
@@ -529,5 +634,7 @@ def test_repeatedly_empty_responses_fail_with_reason(monkeypatch) -> None:
         finally:
             await session.close()
 
-    with pytest.raises(AgentError, match="empty reply \\(response cancelled: turn_detected\\)"):
+    with pytest.raises(
+        AgentError, match="empty reply \\(response cancelled: turn_detected\\)"
+    ):
         asyncio.run(scenario())

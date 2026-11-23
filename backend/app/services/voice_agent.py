@@ -23,7 +23,7 @@ import contextlib
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -34,11 +34,11 @@ from app.services.agent_prompt import RECORD_OUTCOME_TOOL, RECORD_OUTCOME_TOOL_N
 logger = logging.getLogger(__name__)
 
 # (speaker, text, when the turn happened or None for "now") -> None
-TurnCallback = Callable[[str, str, "datetime | None"], None]
+TurnCallback = Callable[[str, str, "datetime | None"], Awaitable[None]]
 # (tool name, JSON arguments) -> JSON output string returned to the agent
-ToolHandler = Callable[[str, str], str]
+ToolHandler = Callable[[str, str], Awaitable[str]]
 # Receives agent audio (bytes, PCM16 24 kHz mono) and UI events (dicts).
-EventListener = Callable[[Any], None]
+EventListener = Callable[[Any], Awaitable[None]]
 
 MAX_TOOL_ROUNDS = 3
 # A typed request whose response is cancelled before any text (barge-in) is
@@ -50,7 +50,10 @@ AGENT_TRANSCRIPT_DELTA_EVENTS = (
     "response.output_audio_transcript.delta",
     "response.output_text.delta",
 )
-AGENT_TRANSCRIPT_EVENTS = ("response.output_audio_transcript.done", "response.output_text.done")
+AGENT_TRANSCRIPT_EVENTS = (
+    "response.output_audio_transcript.done",
+    "response.output_text.done",
+)
 
 
 class AgentError(Exception):
@@ -173,14 +176,18 @@ class LiveAgentSession:
             self._conn = await self._cm.__aenter__()
         except Exception as exc:
             self._cm = None
-            raise AgentError(f"Could not connect to the Foundry voice agent: {exc}") from exc
+            raise AgentError(
+                f"Could not connect to the Foundry voice agent: {exc}"
+            ) from exc
 
         self._pump_task = asyncio.create_task(self._pump(), name="voice-agent-pump")
         try:
             await asyncio.wait_for(self._ready.wait(), self._timeout)
         except TimeoutError as exc:
             await self.close()
-            raise AgentError("Timed out waiting for the voice agent session to start") from exc
+            raise AgentError(
+                "Timed out waiting for the voice agent session to start"
+            ) from exc
         if self._closed:
             reason = self._close_reason
             await self.close()
@@ -190,7 +197,10 @@ class LiveAgentSession:
             if RECORD_OUTCOME_TOOL_NAME not in (self.session_info.get("tools") or []):
                 # The Foundry agent has no outcome tool: send it with this session
                 # so payment promises and other outcomes are still recorded.
-                logger.info("Agent has no %s tool; sending it with the session", RECORD_OUTCOME_TOOL_NAME)
+                logger.info(
+                    "Agent has no %s tool; sending it with the session",
+                    RECORD_OUTCOME_TOOL_NAME,
+                )
                 await self._send(
                     {
                         "type": "session.update",
@@ -236,7 +246,9 @@ class LiveAgentSession:
         """Send a user text message (or none, for the opening) and await the reply."""
         async with self._lock:
             if not self.is_open:
-                raise AgentError(self._close_reason or "The voice agent session is not open")
+                raise AgentError(
+                    self._close_reason or "The voice agent session is not open"
+                )
             if user_text is None and self._responses_started:
                 # The agent already greeted by itself: that greeting is the opening
                 # (unless it was cancelled before saying anything).
@@ -294,11 +306,15 @@ class LiveAgentSession:
     async def append_audio(self, pcm16: bytes) -> None:
         """Stream microphone PCM16 (24 kHz mono) into the agent's input buffer."""
         if not self.is_open:
-            raise AgentError(self._close_reason or "The voice agent session is not open")
+            raise AgentError(
+                self._close_reason or "The voice agent session is not open"
+            )
         try:
             await self._conn.input_audio_buffer.append(audio=pcm16)
         except Exception as exc:
-            raise AgentError(f"Could not stream audio to the voice agent: {exc}") from exc
+            raise AgentError(
+                f"Could not stream audio to the voice agent: {exc}"
+            ) from exc
 
     async def create_response(self) -> None:
         """Ask the agent to speak now (e.g. its opening line) without waiting for it.
@@ -306,15 +322,17 @@ class LiveAgentSession:
         Skipped when the agent already started speaking by itself.
         """
         if not self.is_open:
-            raise AgentError(self._close_reason or "The voice agent session is not open")
+            raise AgentError(
+                self._close_reason or "The voice agent session is not open"
+            )
         if self._responses_started:
             return
         await self._conn.response.create()
 
-    def _emit(self, event: Any) -> None:
+    async def _emit(self, event: Any) -> None:
         if self._on_event is not None:
             try:
-                self._on_event(event)
+                await self._on_event(event)
             except Exception:  # a slow/broken listener must not kill the pump
                 logger.exception("Voice event listener failed")
 
@@ -337,7 +355,7 @@ class LiveAgentSession:
             reason = self._close_reason or "The voice agent session ended"
             self._fail_pending(AgentError(reason))
             if not self._closing:
-                self._emit({"type": "agent_closed", "reason": reason})
+                await self._emit({"type": "agent_closed", "reason": reason})
 
     async def _handle(self, event: Any) -> None:
         kind = event_type(event)
@@ -358,8 +376,11 @@ class LiveAgentSession:
                 latency.recorder.record(latency.VOICE_REPLY, reply_ms)
                 self._speech_stopped_at = None
             try:
-                self._emit(audio_bytes(event_value(event, "delta")))
-            except (AgentError, ValueError) as exc:  # skip one bad chunk, keep the call alive
+                await self._emit(audio_bytes(event_value(event, "delta")))
+            except (
+                AgentError,
+                ValueError,
+            ) as exc:  # skip one bad chunk, keep the call alive
                 logger.warning("Dropping agent audio chunk: %s", exc)
         elif kind in AGENT_TRANSCRIPT_DELTA_EVENTS:
             delta = event_value(event, "delta")
@@ -367,16 +388,18 @@ class LiveAgentSession:
                 self._transcript_deltas.append(delta)
         elif kind in AGENT_TRANSCRIPT_EVENTS:
             self._transcript_deltas = []  # the final text supersedes the partial deltas
-            text = (event_value(event, "transcript") or event_value(event, "text") or "").strip()
+            text = (
+                event_value(event, "transcript") or event_value(event, "text") or ""
+            ).strip()
             if text and (not self._response_text or self._response_text[-1] != text):
                 self._response_text.append(text)
         elif kind == "input_audio_buffer.speech_started":
             # Barge-in: the browser drops queued agent audio.
             self._speech_stopped_at = None
-            self._emit({"type": "speech_started"})
+            await self._emit({"type": "speech_started"})
         elif kind == "input_audio_buffer.speech_stopped":
             self._speech_stopped_at = time.monotonic()
-            self._emit({"type": "speech_stopped"})
+            await self._emit({"type": "speech_stopped"})
         elif kind == "input_audio_buffer.committed":
             item_id = event_value(event, "item_id")
             if item_id:
@@ -385,10 +408,12 @@ class LiveAgentSession:
             text = (event_value(event, "transcript") or "").strip()
             at = self._speech_committed_at.pop(str(event_value(event, "item_id")), None)
             if text:
-                self._on_turn("user", text, at)
+                await self._on_turn("user", text, at)
         elif kind == "conversation.item.input_audio_transcription.failed":
             self._speech_committed_at.pop(str(event_value(event, "item_id")), None)
-            logger.warning("User speech transcription failed: %s", event_value(event, "error"))
+            logger.warning(
+                "User speech transcription failed: %s", event_value(event, "error")
+            )
         elif kind == "error":
             error = event_value(event, "error")
             message = event_value(error, "message") or "Voice agent error"
@@ -396,7 +421,9 @@ class LiveAgentSession:
                 # The agent was already responding (e.g. its own greeting). That
                 # response answers an opening request; a typed message is asked
                 # for again once it finishes.
-                logger.info("Voice agent was already responding; waiting for it to finish")
+                logger.info(
+                    "Voice agent was already responding; waiting for it to finish"
+                )
                 if self._pending is not None and not self._pending.done():
                     self._create_after_done = self._pending_user_text
                 return
@@ -428,13 +455,15 @@ class LiveAgentSession:
             texts = self._message_text(output)
         text = " ".join(texts).strip()
         if text:
-            self._on_turn("agent", text, None)
+            await self._on_turn("agent", text, None)
             self._reply_parts.append(text)
 
         if calls and status == "completed":
             self._tool_rounds += 1
             if self._tool_rounds > MAX_TOOL_ROUNDS:
-                self._fail_pending(AgentError("The voice agent kept calling tools without replying"))
+                self._fail_pending(
+                    AgentError("The voice agent kept calling tools without replying")
+                )
                 return
             for call in calls:
                 await self._send(
@@ -443,7 +472,7 @@ class LiveAgentSession:
                         "item": {
                             "type": "function_call_output",
                             "call_id": event_value(call, "call_id"),
-                            "output": self._run_tool(call),
+                            "output": await self._run_tool(call),
                         },
                     }
                 )
@@ -452,10 +481,12 @@ class LiveAgentSession:
 
         reply = " ".join(self._reply_parts).strip()
         self._reply_parts = []
-        self._tool_rounds = 0  # a final reply ends the tool chain (voice has no request_reply)
+        self._tool_rounds = (
+            0  # a final reply ends the tool chain (voice has no request_reply)
+        )
         if reply:
             self._last_reply = reply
-        self._emit({"type": "response_done"})
+        await self._emit({"type": "response_done"})
         if self._pending is None or self._pending.done():
             return
         if self._create_after_done:
@@ -471,39 +502,57 @@ class LiveAgentSession:
         # instead of returning an empty reply; ask again if none starts.
         details = event_value(response, "status_details")
         reason = event_value(details, "reason") or details
-        if status in ("cancelled", "incomplete") and self._empty_retries < MAX_EMPTY_RETRIES:
+        if (
+            status in ("cancelled", "incomplete")
+            and self._empty_retries < MAX_EMPTY_RETRIES
+        ):
             self._empty_retries += 1
-            logger.info("Voice agent response %s without text (%s); waiting for the next one", status, reason)
+            logger.info(
+                "Voice agent response %s without text (%s); waiting for the next one",
+                status,
+                reason,
+            )
             self._schedule_retry()
             return
         suffix = f": {reason}" if reason else ""
         self._fail_pending(
-            AgentError(f"The voice agent returned an empty reply (response {status}{suffix})")
+            AgentError(
+                f"The voice agent returned an empty reply (response {status}{suffix})"
+            )
         )
 
     def _schedule_retry(self) -> None:
         if self._retry_task is None or self._retry_task.done():
-            self._retry_task = asyncio.create_task(self._retry_if_idle(), name="voice-agent-retry")
+            self._retry_task = asyncio.create_task(
+                self._retry_if_idle(), name="voice-agent-retry"
+            )
 
     async def _retry_if_idle(self) -> None:
         await asyncio.sleep(EMPTY_REPLY_RETRY_SECONDS)
         pending = self._pending
         # Another response started (e.g. the agent answering the speech) or
         # the request is already answered: nothing to do.
-        if pending is None or pending.done() or not self._idle.is_set() or not self.is_open:
+        if (
+            pending is None
+            or pending.done()
+            or not self._idle.is_set()
+            or not self.is_open
+        ):
             return
         try:
             await self._conn.response.create()
-        except Exception as exc:
-            self._fail_pending(AgentError(f"Could not ask the voice agent again: {exc}"))
+        except Exception as exc:  # noqa: BLE001 - any SDK failure fails the turn
+            self._fail_pending(
+                AgentError(f"Could not ask the voice agent again: {exc}")
+            )
 
-    def _run_tool(self, call: Any) -> str:
+    async def _run_tool(self, call: Any) -> str:
         name = str(event_value(call, "name") or "")
         arguments = event_value(call, "arguments") or "{}"
         if not isinstance(arguments, str):
             arguments = json.dumps(arguments)
         try:
-            return self._on_tool_call(name, arguments)
+            return await self._on_tool_call(name, arguments)
         except Exception as exc:  # never let a tool crash the pump
             logger.exception("Tool %s failed", name)
             return json.dumps({"recorded": False, "error": f"Tool failed: {exc}"})
@@ -556,7 +605,9 @@ class FoundryAgentConnector:
         self._credential: Any = None
 
     def connect(self) -> AbstractAsyncContextManager[Any]:
-        return self._get_client().voice_agents.realtime.connect(agent_name=self._agent_name)
+        return self._get_client().voice_agents.realtime.connect(
+            agent_name=self._agent_name
+        )
 
     def _get_client(self) -> Any:
         # Created lazily inside the running event loop (aiohttp needs one).
@@ -564,6 +615,7 @@ class FoundryAgentConnector:
             import aiohttp
             from azure.ai.projects.aio import AIProjectClient
             from azure.core.pipeline.transport import AioHttpTransport
+
             if self._credential_factory is not None:
                 self._credential = self._credential_factory()
             else:

@@ -66,9 +66,18 @@ _MONTHS = {
     m: i
     for i, names in enumerate(
         [
-            ("january", "jan"), ("february", "feb"), ("march", "mar"), ("april", "apr"),
-            ("may",), ("june", "jun"), ("july", "jul"), ("august", "aug"),
-            ("september", "sep", "sept"), ("october", "oct"), ("november", "nov"), ("december", "dec"),
+            ("january", "jan"),
+            ("february", "feb"),
+            ("march", "mar"),
+            ("april", "apr"),
+            ("may",),
+            ("june", "jun"),
+            ("july", "jul"),
+            ("august", "aug"),
+            ("september", "sep", "sept"),
+            ("october", "oct"),
+            ("november", "nov"),
+            ("december", "dec"),
         ],
         start=1,
     )
@@ -76,8 +85,14 @@ _MONTHS = {
 }
 _MONTH_RE = "|".join(sorted(_MONTHS, key=len, reverse=True))
 _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
-_DAY_MONTH = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MONTH_RE})\b\.?(?:,?\s*(\d{{4}}))?", re.IGNORECASE)
-_MONTH_DAY = re.compile(rf"\b({_MONTH_RE})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b(?:,?\s*(\d{{4}}))?", re.IGNORECASE)
+_DAY_MONTH = re.compile(
+    rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MONTH_RE})\b\.?(?:,?\s*(\d{{4}}))?",
+    re.IGNORECASE,
+)
+_MONTH_DAY = re.compile(
+    rf"\b({_MONTH_RE})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b(?:,?\s*(\d{{4}}))?",
+    re.IGNORECASE,
+)
 
 # Redaction of customer-provided secrets.
 _CARD_CANDIDATE = re.compile(r"\b\d(?:[ -]?\d){12,18}\b")
@@ -89,7 +104,8 @@ _DIGITS_AFTER_TERM = re.compile(
 )
 # A password-like token that contains a digit: "my password is hunter2".
 _TOKEN_AFTER_TERM = re.compile(
-    rf"\b{_SECRET_TERM}(\s*(?:is|was|:|=|-)\s*)((?=[^\s,.;]*\d)[^\s,.;]{{3,32}})", re.IGNORECASE
+    rf"\b{_SECRET_TERM}(\s*(?:is|was|:|=|-)\s*)((?=[^\s,.;]*\d)[^\s,.;]{{3,32}})",
+    re.IGNORECASE,
 )
 REDACTED_CARD = "[card number removed]"
 REDACTED_CODE = "[removed]"
@@ -139,11 +155,15 @@ def extract_dates(text: str, today: date) -> list[date]:
         except ValueError:
             pass
     for d, month, y in _DAY_MONTH.findall(text):
-        resolved = _resolve_year(int(d), _MONTHS[month.lower()], int(y) if y else None, today)
+        resolved = _resolve_year(
+            int(d), _MONTHS[month.lower()], int(y) if y else None, today
+        )
         if resolved:
             found.append(resolved)
     for month, d, y in _MONTH_DAY.findall(text):
-        resolved = _resolve_year(int(d), _MONTHS[month.lower()], int(y) if y else None, today)
+        resolved = _resolve_year(
+            int(d), _MONTHS[month.lower()], int(y) if y else None, today
+        )
         if resolved:
             found.append(resolved)
     return found
@@ -166,7 +186,9 @@ def check_agent_text(
     flags: list[ReviewFlag] = []
 
     def flag(kind: str, detail: str, excerpt: str) -> None:
-        flags.append(ReviewFlag(kind=kind, speaker="agent", detail=detail, excerpt=excerpt[:300]))
+        flags.append(
+            ReviewFlag(kind=kind, speaker="agent", detail=detail, excerpt=excerpt[:300])
+        )
 
     for sentence in _sentences(text):
         negated = bool(_NEGATION.search(sentence))
@@ -186,10 +208,18 @@ def check_agent_text(
             )
         for value in extract_amounts(sentence):
             if round(value, 2) not in amounts:
-                flag("unverified_amount", f"Amount {value:,.2f} is not the amount due", sentence)
+                flag(
+                    "unverified_amount",
+                    f"Amount {value:,.2f} is not the amount due",
+                    sentence,
+                )
         for digits in _INVOICE.findall(sentence):
             if digits != own_invoice_digits:
-                flag("unverified_invoice", f"Invoice INV-{digits} is not this customer's invoice", sentence)
+                flag(
+                    "unverified_invoice",
+                    f"Invoice INV-{digits} is not this customer's invoice",
+                    sentence,
+                )
         for mentioned in extract_dates(sentence, today):
             if mentioned not in dates:
                 flag(

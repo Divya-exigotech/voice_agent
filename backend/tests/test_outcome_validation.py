@@ -34,7 +34,15 @@ def test_accepts_business_outcomes(outcome) -> None:
 
 
 def test_payment_promised_with_date_from_json_string() -> None:
-    result = validate(json.dumps({"outcome": "payment_promised", "promised_payment_date": "2026-11-20", "summary": "  Will pay Friday.  "}))
+    result = validate(
+        json.dumps(
+            {
+                "outcome": "payment_promised",
+                "promised_payment_date": "2026-11-20",
+                "summary": "  Will pay Friday.  ",
+            }
+        )
+    )
     assert result.ok
     assert result.proposal.promised_payment_date == date(2026, 11, 20)
     assert result.proposal.summary == "Will pay Friday."
@@ -42,7 +50,9 @@ def test_payment_promised_with_date_from_json_string() -> None:
 
 
 def test_today_is_allowed() -> None:
-    assert validate({"outcome": "payment_promised", "promised_payment_date": "2026-11-17"}).ok
+    assert validate(
+        {"outcome": "payment_promised", "promised_payment_date": "2026-11-17"}
+    ).ok
 
 
 def test_empty_date_is_treated_as_missing() -> None:
@@ -59,12 +69,27 @@ def test_empty_date_is_treated_as_missing() -> None:
         ({"outcome": "technical_failure"}, "outcome must be one of"),
         ({"outcome": "paid_in_full"}, "outcome must be one of"),
         ({"outcome": ["reported_paid"]}, "outcome must be one of"),
-        ({"outcome": "reported_paid", "promised_payment_date": "2026-11-20"}, "only allowed"),
-        ({"outcome": "payment_promised", "promised_payment_date": "Friday"}, "valid YYYY-MM-DD"),
-        ({"outcome": "payment_promised", "promised_payment_date": "2026-02-30"}, "valid YYYY-MM-DD"),
+        (
+            {"outcome": "reported_paid", "promised_payment_date": "2026-11-20"},
+            "only allowed",
+        ),
+        (
+            {"outcome": "payment_promised", "promised_payment_date": "Friday"},
+            "valid YYYY-MM-DD",
+        ),
+        (
+            {"outcome": "payment_promised", "promised_payment_date": "2026-02-30"},
+            "valid YYYY-MM-DD",
+        ),
         ({"outcome": "payment_promised", "promised_payment_date": 20261120}, "string"),
-        ({"outcome": "payment_promised", "promised_payment_date": "2026-11-16"}, "in the past"),
-        ({"outcome": "payment_promised", "promised_payment_date": "2027-03-01"}, "90 days"),
+        (
+            {"outcome": "payment_promised", "promised_payment_date": "2026-11-16"},
+            "in the past",
+        ),
+        (
+            {"outcome": "payment_promised", "promised_payment_date": "2027-03-01"},
+            "90 days",
+        ),
         ({"outcome": "reported_paid", "summary": 5}, "summary must be a string"),
     ],
 )

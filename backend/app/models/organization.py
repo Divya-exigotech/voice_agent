@@ -15,33 +15,47 @@ class Organization(UUIDPrimaryKey, Timestamps, Base):
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     plan: Mapped[str] = mapped_column(String(50), nullable=False, server_default="free")
-    timezone: Mapped[str] = mapped_column(String(64), nullable=False, server_default="UTC")
-    settings: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default="UTC"
+    )
+    settings: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
 
 
 class Integration(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "integrations"
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        index=True,
     )
     api_url: Mapped[str] = mapped_column(Text, nullable=False)
     # Non-secret config plus a reference to the secret (e.g. Key Vault); never raw credentials.
-    auth_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
-    sync_status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="idle")
+    auth_config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    sync_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="idle"
+    )
 
 
 class SyncRun(UUIDPrimaryKey, Base):
     __tablename__ = "sync_runs"
 
     integration_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("integrations.id", ondelete="CASCADE"), index=True
+        UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        index=True,
     )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    status: Mapped[str] = mapped_column(String(30), nullable=False, server_default="running")
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="running"
+    )
 
 
 class AuditLog(UUIDPrimaryKey, Base):
@@ -56,4 +70,6 @@ class AuditLog(UUIDPrimaryKey, Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    __table_args__ = (Index("ix_audit_logs_org_timestamp", "organization_id", "timestamp"),)
+    __table_args__ = (
+        Index("ix_audit_logs_org_timestamp", "organization_id", "timestamp"),
+    )

@@ -20,7 +20,9 @@ def customer(sample_customers):
 
 
 def kinds(text, customer, **kw):
-    return [f.kind for f in check_agent_text(text, customer=customer, today=TODAY, **kw)]
+    return [
+        f.kind for f in check_agent_text(text, customer=customer, today=TODAY, **kw)
+    ]
 
 
 # --- Sensitive data requests -------------------------------------------------------
@@ -60,7 +62,11 @@ def test_does_not_flag_warnings_or_payment_methods(text, customer) -> None:
 
 @pytest.mark.parametrize(
     "text",
-    ["Your invoice INV-3 for INR 300 was due on 3 November 2026.", "The amount due is ₹300.", "That's 300 rupees, due 2026-11-03."],
+    [
+        "Your invoice INV-3 for INR 300 was due on 3 November 2026.",
+        "The amount due is ₹300.",
+        "That's 300 rupees, due 2026-11-03.",
+    ],
 )
 def test_record_facts_pass(text, customer) -> None:
     assert kinds(text, customer) == []
@@ -74,7 +80,10 @@ def test_flags_invented_amount_invoice_and_date(customer) -> None:
 def test_amounts_and_dates_the_customer_said_are_allowed(customer) -> None:
     text = "Thanks, I've noted that you paid INR 150 on 15 November."
     assert set(kinds(text, customer)) == {"unverified_amount", "unverified_date"}
-    assert kinds(text, customer, allowed_amounts=[150], allowed_dates=[date(2026, 11, 15)]) == []
+    assert (
+        kinds(text, customer, allowed_amounts=[150], allowed_dates=[date(2026, 11, 15)])
+        == []
+    )
 
 
 @pytest.mark.parametrize(
@@ -101,7 +110,11 @@ def test_disclaimed_policy_mention_is_not_flagged(text, customer) -> None:
 
 
 def test_extractors() -> None:
-    assert extract_amounts("₹2,500.50 and 300 rupees and INR 10") == [2500.5, 300.0, 10.0]
+    assert extract_amounts("₹2,500.50 and 300 rupees and INR 10") == [
+        2500.5,
+        300.0,
+        10.0,
+    ]
     assert extract_dates("on 20th November and Dec 2 and 2026-11-03", TODAY) == [
         date(2026, 11, 3),
         date(2026, 11, 20),

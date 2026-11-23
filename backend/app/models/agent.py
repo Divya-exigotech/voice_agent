@@ -13,7 +13,9 @@ class Agent(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "agents"
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        index=True,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
@@ -28,8 +30,14 @@ class Workflow(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "workflows"
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        index=True,
     )
     trigger_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    conditions: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
-    actions: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    conditions: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    actions: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )

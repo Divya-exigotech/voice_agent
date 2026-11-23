@@ -1,5 +1,6 @@
 """Loads and validates the single customer/invoice JSON file."""
 
+import asyncio
 from collections import Counter
 from pathlib import Path
 
@@ -37,9 +38,11 @@ def parse_customers(raw: str | bytes, source: str = "<memory>") -> list[Customer
     return customers
 
 
-def load_customers(path: Path) -> list[Customer]:
+async def load_customers(path: Path) -> list[Customer]:
     try:
-        raw = path.read_bytes()
+        raw = await asyncio.to_thread(path.read_bytes)
     except OSError as exc:
-        raise CustomerDataError(f"Cannot read customer data file {path}: {exc}") from exc
+        raise CustomerDataError(
+            f"Cannot read customer data file {path}: {exc}"
+        ) from exc
     return parse_customers(raw, source=str(path))

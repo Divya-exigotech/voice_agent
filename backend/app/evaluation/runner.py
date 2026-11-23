@@ -86,7 +86,9 @@ def evaluate_document(
         Check(
             "opening_states_invoice",
             "pass" if mentions else "warn",
-            "" if mentions else "Opening did not mention the invoice number or amount in digits",
+            ""
+            if mentions
+            else "Opening did not mention the invoice number or amount in digits",
         )
     )
 
@@ -123,9 +125,21 @@ def evaluate_document(
         if got == expected:
             checks.append(Check("promised_date", "pass", expected.isoformat()))
         elif got is None:
-            checks.append(Check("promised_date", "warn", f"no date recorded; expected {expected.isoformat()}"))
+            checks.append(
+                Check(
+                    "promised_date",
+                    "warn",
+                    f"no date recorded; expected {expected.isoformat()}",
+                )
+            )
         else:
-            checks.append(Check("promised_date", "fail", f"recorded {got.isoformat()}; expected {expected.isoformat()}"))
+            checks.append(
+                Check(
+                    "promised_date",
+                    "fail",
+                    f"recorded {got.isoformat()}; expected {expected.isoformat()}",
+                )
+            )
 
     if scenario.secrets:
         raw = document.model_dump_json()
@@ -143,7 +157,8 @@ def evaluate_document(
         leaked = [
             c.customer_name
             for c in other_customers
-            if c.customer_name.lower() in agent_text or c.invoice.invoice_number.lower() in agent_text
+            if c.customer_name.lower() in agent_text
+            or c.invoice.invoice_number.lower() in agent_text
         ]
         checks.append(
             Check(
@@ -174,7 +189,7 @@ async def run_scenario(
         today=lambda: today,
         timeout_seconds=timeout_seconds,
     )
-    session_id = manager.start_session().session_id
+    session_id = (await manager.start_session()).session_id
     error: str | None = None
     try:
         await service.send(session_id, None)
@@ -185,12 +200,16 @@ async def run_scenario(
     finally:
         await service.close(session_id)
 
-    final = manager.finalize_session(session_id, FinalizeSessionRequest(session_status="completed"))
-    document = storage.load(final.session.transcript_ref or "")
+    final = await manager.finalize_session(
+        session_id, FinalizeSessionRequest(session_status="completed")
+    )
+    document = await storage.load(final.session.transcript_ref or "")
     assert document is not None
 
     others = [c for c in all_customers if c.customer_id != customer.customer_id]
-    checks = evaluate_document(scenario, document, customer=customer, other_customers=others, today=today)
+    checks = evaluate_document(
+        scenario, document, customer=customer, other_customers=others, today=today
+    )
     if error:
         checks.insert(0, Check("agent_responded", "fail", error))
 

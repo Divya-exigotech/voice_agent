@@ -1,10 +1,10 @@
 """Coordinates the customer queue, session metadata and transcript storage."""
 
+import asyncio
 import bisect
 import logging
-import threading
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -88,14 +88,14 @@ class SessionManager:
         *,
         clock: Callable[[], datetime] = _utcnow,
         id_factory: Callable[[], str] = _new_session_id,
-        on_session_start: Callable[[SessionRecord], None] | None = None,
+        on_session_start: Callable[[SessionRecord], Awaitable[None]] | None = None,
         allow_reset: bool = True,
-        on_turns_changed: Callable[[str], None] | None = None,
+        on_turns_changed: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        # Non-blocking notification after a turn is added (live persistence).
+        # Cheap async notification after a turn is added (live persistence).
         self.on_turns_changed = on_turns_changed
         # on_session_start persists a new session before it is handed out
-        # (blocking I/O); if it raises, the session is not started.
+        # (database I/O); if it raises, the session is not started.
         self._on_session_start = on_session_start
         # The database-backed queue cannot be replayed from the start.
         self._allow_reset = allow_reset
@@ -114,7 +114,7 @@ class SessionManager:
         self._flags: dict[str, list[ReviewFlag]] = {}
         # Sessions whose transcript upload is in flight.
         self._finalizing: set[str] = set()
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
     @property
     def customers(self) -> tuple[Customer, ...]:
@@ -123,23 +123,25 @@ class SessionManager:
     def now(self) -> datetime:
         return self._clock()
 
-    def queue_state(self) -> QueueState:
-        with self._lock:
+    async def queue_state(self) -> QueueState:
+        async with self._lock:
             return self._queue_state()
 
-    def list_sessions(self) -> list[SessionRecord]:
-        with self._lock:
+    async def list_sessions(self) -> list[SessionRecord]:
+        async with self._lock:
             return list(self._sessions.values())
 
-    def start_session(self, expected_customer_id: str | None = None) -> SessionRecord:
+    async def start_session(
+        self, expected_customer_id: str | None = None
+    ) -> SessionRecord:
         """Start a session for the current customer.
 
         The queue slot is claimed under the lock, the session is persisted via
-        `on_session_start` outside it (blocking I/O), and only then is the
+        `on_session_start` outside it (database I/O), and only then is the
         session registered. If persisting fails the slot is released, the
         queue does not move, and SessionStartError is raised.
         """
-        with self._lock:
+        async with self._lock:
             session_id = self._id_factory()
             index = self._queue.current_index
             customer = self._queue.begin(session_id, expected_customer_id)
@@ -154,21 +156,21 @@ class SessionManager:
 
         if self._on_session_start is not None:
             try:
-                self._on_session_start(record)
+                await self._on_session_start(record)
             except Exception as exc:
-                with self._lock:
+                async with self._lock:
                     self._queue.finish(session_id, advance=False)
                 raise SessionStartError(str(exc)) from exc
 
-        with self._lock:
+        async with self._lock:
             self._sessions[session_id] = record
             self._turns[session_id] = []
             return record
 
     # --- Conversation state -------------------------------------------------
 
-    def get_conversation(self, session_id: str) -> ConversationSnapshot:
-        with self._lock:
+    async def get_conversation(self, session_id: str) -> ConversationSnapshot:
+        async with self._lock:
             record = self._active_record(session_id)
             return ConversationSnapshot(
                 session=record,
@@ -178,14 +180,14 @@ class SessionManager:
                 flags=tuple(self._flags.get(session_id, ())),
             )
 
-    def add_review_flags(self, session_id: str, flags: list[ReviewFlag]) -> None:
+    async def add_review_flags(self, session_id: str, flags: list[ReviewFlag]) -> None:
         if not flags:
             return
-        with self._lock:
+        async with self._lock:
             self._active_record(session_id)
             self._flags.setdefault(session_id, []).extend(flags)
 
-    def append_turn(
+    async def append_turn(
         self,
         session_id: str,
         speaker: Speaker,
@@ -198,33 +200,37 @@ class SessionManager:
         speech transcription that completes after the agent started replying
         is placed at the moment the user stopped speaking.
         """
-        with self._lock:
+        async with self._lock:
             self._active_record(session_id)
             turns = self._turns.setdefault(session_id, [])
             timestamp = at or self._clock()
             index = bisect.bisect_right([t.timestamp for t in turns], timestamp)
             turns.insert(
                 index,
-                TranscriptTurn(turn=index + 1, speaker=speaker, text=text, timestamp=timestamp),
+                TranscriptTurn(
+                    turn=index + 1, speaker=speaker, text=text, timestamp=timestamp
+                ),
             )
             for number in range(index, len(turns)):
                 turns[number] = turns[number].model_copy(update={"turn": number + 1})
             added = turns[index]
         if self.on_turns_changed is not None:
             try:
-                self.on_turns_changed(session_id)
+                await self.on_turns_changed(session_id)
             except Exception:  # live persistence must never break the conversation
                 logger.exception("Turn change hook failed for session %s", session_id)
         return added
 
-    def set_proposed_outcome(self, session_id: str, proposal: OutcomeProposal) -> None:
-        with self._lock:
+    async def set_proposed_outcome(
+        self, session_id: str, proposal: OutcomeProposal
+    ) -> None:
+        async with self._lock:
             self._active_record(session_id)
             self._proposals[session_id] = proposal
 
     # --- Finalization ---------------------------------------------------------
 
-    def finalize_session(
+    async def finalize_session(
         self, session_id: str, request: FinalizeSessionRequest
     ) -> FinalizeResult:
         """Save the transcript, then mark the session final and advance the queue.
@@ -234,10 +240,9 @@ class SessionManager:
           2. (unlocked) upload the transcript;
           3. (locked) commit, or release the claim if the upload failed.
         While finalizing, the session accepts no new turns and a concurrent
-        finalize gets FinalizeInProgressError. Blocking (storage I/O): call it
-        from a worker thread in async code.
+        finalize gets FinalizeInProgressError.
         """
-        with self._lock:
+        async with self._lock:
             record = self._sessions.get(session_id)
             if record is None:
                 raise SessionNotFoundError(session_id)
@@ -255,13 +260,13 @@ class SessionManager:
 
         # The queue only advances after the transcript is safely stored.
         try:
-            reference = self._storage.save(document)
+            reference = await self._storage.save(document)
         except Exception as exc:
-            with self._lock:
+            async with self._lock:
                 self._finalizing.discard(session_id)
             raise TranscriptSaveError(str(exc)) from exc
 
-        with self._lock:
+        async with self._lock:
             self._finalizing.discard(session_id)
             updated = record.model_copy(
                 update={
@@ -282,24 +287,26 @@ class SessionManager:
             )
             return FinalizeResult(updated, advanced=advanced, already_finalized=False)
 
-    def get_session(self, session_id: str) -> SessionRecord:
-        with self._lock:
+    async def get_session(self, session_id: str) -> SessionRecord:
+        async with self._lock:
             record = self._sessions.get(session_id)
             if record is None:
                 raise SessionNotFoundError(session_id)
             return record
 
-    def load_transcript(self, session_id: str) -> TranscriptDocument:
-        """Read a finalized session's transcript back from storage (blocking I/O)."""
-        record = self.get_session(session_id)
+    async def load_transcript(self, session_id: str) -> TranscriptDocument:
+        """Read a finalized session's transcript back from storage."""
+        record = await self.get_session(session_id)
         if record.transcript_ref is None:
             raise TranscriptNotSavedError(session_id)
         try:
-            document = self._storage.load(record.transcript_ref)
+            document = await self._storage.load(record.transcript_ref)
         except Exception as exc:
             raise TranscriptLoadError(str(exc)) from exc
         if document is None:
-            raise TranscriptLoadError(f"Transcript {record.transcript_ref} was not found in storage")
+            raise TranscriptLoadError(
+                f"Transcript {record.transcript_ref} was not found in storage"
+            )
         return document
 
     @property
@@ -332,23 +339,23 @@ class SessionManager:
             review_flags=list(self._flags.get(session_id, ())),
         )
 
-    def requeue_customer(self, customer: Customer) -> None:
+    async def requeue_customer(self, customer: Customer) -> None:
         """Add a customer to the end of the queue (follow-up call, after everyone else)."""
-        with self._lock:
+        async with self._lock:
             self._customers_by_id[customer.customer_id] = customer
             self._queue.append(customer)
 
-    def customer(self, customer_id: str) -> Customer | None:
-        with self._lock:
+    async def customer(self, customer_id: str) -> Customer | None:
+        async with self._lock:
             return self._customers_by_id.get(customer_id)
 
-    def reset_queue(self) -> QueueState:
+    async def reset_queue(self) -> QueueState:
         if not self._allow_reset:
             raise QueueError(
                 "Reset is not available for the database queue; finished call tasks "
                 "are not called again"
             )
-        with self._lock:
+        async with self._lock:
             self._queue.reset()
             return self._queue_state()
 

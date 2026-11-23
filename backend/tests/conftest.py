@@ -2,11 +2,13 @@ import asyncio
 import base64
 import copy
 import json
+import sys
+import warnings
 from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from fastapi.testclient import TestClient
@@ -81,6 +83,16 @@ def customers_file(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture(scope="session")
+def event_loop_policy():
+    """psycopg's async mode needs the selector loop, which is not Windows' default."""
+    if sys.platform == "win32":
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            return asyncio.WindowsSelectorEventLoopPolicy()
+    return asyncio.get_event_loop_policy()
+
+
 TODAY = date(2026, 11, 17)
 TEST_TIMEOUT_SECONDS = 1.0
 
@@ -112,14 +124,23 @@ def agent_says(text: str) -> list[Any]:
     ]
 
 
-def agent_calls_tool(arguments: dict | str, call_id: str = "call_1", name: str = "record_outcome") -> list[Any]:
+def agent_calls_tool(
+    arguments: dict | str, call_id: str = "call_1", name: str = "record_outcome"
+) -> list[Any]:
     args = arguments if isinstance(arguments, str) else json.dumps(arguments)
     return [
         {
             "type": "response.done",
             "response": {
                 "status": "completed",
-                "output": [{"type": "function_call", "name": name, "call_id": call_id, "arguments": args}],
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": name,
+                        "call_id": call_id,
+                        "arguments": args,
+                    }
+                ],
             },
         }
     ]
@@ -134,12 +155,19 @@ def user_speaks(text: str, item_id: str = "item_user_1") -> list[Any]:
         {"type": "input_audio_buffer.speech_started", "item_id": item_id},
         {"type": "input_audio_buffer.speech_stopped", "item_id": item_id},
         {"type": "input_audio_buffer.committed", "item_id": item_id},
-        {"type": "conversation.item.input_audio_transcription.completed", "item_id": item_id, "transcript": text},
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": item_id,
+            "transcript": text,
+        },
     ]
 
 
 def agent_audio(pcm: bytes = b"\x01\x00\x02\x00") -> dict[str, Any]:
-    return {"type": "response.output_audio.delta", "delta": base64.b64encode(pcm).decode()}
+    return {
+        "type": "response.output_audio.delta",
+        "delta": base64.b64encode(pcm).decode(),
+    }
 
 
 class FakeConnection:
@@ -159,7 +187,7 @@ class FakeConnection:
         if self.connector.audio_script:
             await self.emit(*self.connector.audio_script.pop(0))
 
-    async def __aenter__(self) -> "FakeConnection":
+    async def __aenter__(self) -> Self:
         self._queue = asyncio.Queue()
         if self.connector.fail_connect is not None:
             raise self.connector.fail_connect
@@ -177,7 +205,7 @@ class FakeConnection:
             )
         return self
 
-    async def __aexit__(self, *exc_info: Any) -> None:
+    async def __aexit__(self, *exc_info: object) -> None:
         self.exited = True
         if self._queue is not None:
             await self._queue.put(_END)
@@ -192,7 +220,9 @@ class FakeConnection:
     async def _create(self) -> None:
         self.creates += 1
         script = self.connector.script
-        await self.emit(*(script.pop(0) if script else agent_says(f"Agent reply {self.creates}")))
+        await self.emit(
+            *(script.pop(0) if script else agent_says(f"Agent reply {self.creates}"))
+        )
 
     def __aiter__(self):
         return self._iterate()
@@ -207,7 +237,9 @@ class FakeConnection:
             yield event
 
     def items(self, item_type: str) -> list[dict[str, Any]]:
-        return [e["item"] for e in self.sent if e.get("item", {}).get("type") == item_type]
+        return [
+            e["item"] for e in self.sent if e.get("item", {}).get("type") == item_type
+        ]
 
     @property
     def system_context(self) -> str:
@@ -240,7 +272,10 @@ def fake_agent() -> FakeConnector:
 @pytest.fixture
 def client(customers_file: Path, fake_agent: FakeConnector) -> Iterator[TestClient]:
     app = create_app(
-        isolated_settings(customers_json_path=customers_file, azure_ai_agent_timeout_seconds=TEST_TIMEOUT_SECONDS),
+        isolated_settings(
+            customers_json_path=customers_file,
+            azure_ai_agent_timeout_seconds=TEST_TIMEOUT_SECONDS,
+        ),
         connector=fake_agent,
         today=lambda: TODAY,
     )

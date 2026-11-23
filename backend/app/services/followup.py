@@ -32,7 +32,7 @@ class FollowUpScheduler:
         self._delay = delay_seconds
         self._tasks: set[asyncio.Task[None]] = set()
 
-    def schedule(self, session: SessionRecord) -> None:
+    async def schedule(self, session: SessionRecord) -> None:
         """Plan the next call when ``session`` ended with a payment promise.
 
         Returns immediately; the work runs as a background task.
@@ -52,25 +52,28 @@ class FollowUpScheduler:
         customer_id = session.customer_id
         try:
             if self._store is not None:
-                task_id = await asyncio.to_thread(
-                    self._store.schedule_followup,
+                task_id = await self._store.schedule_followup(
                     customer_id,
                     session.ended_at + timedelta(seconds=self._delay),
                 )
                 if task_id is None:
                     logger.info("No follow-up call queued for %s", customer_id)
                     return
-            logger.info("Follow-up call for %s is due in %d seconds", customer_id, self._delay)
+            logger.info(
+                "Follow-up call for %s is due in %d seconds", customer_id, self._delay
+            )
             await asyncio.sleep(self._delay)
             if self._store is not None:
-                customer = await asyncio.to_thread(self._store.load_followup, customer_id)
+                customer = await self._store.load_followup(customer_id)
             else:
-                customer = self._manager.customer(customer_id)
+                customer = await self._manager.customer(customer_id)
             if customer is None:
                 logger.warning("Follow-up call for %s could not be loaded", customer_id)
                 return
-            self._manager.requeue_customer(customer)
-            logger.info("Follow-up call for %s was added to the end of the queue", customer_id)
+            await self._manager.requeue_customer(customer)
+            logger.info(
+                "Follow-up call for %s was added to the end of the queue", customer_id
+            )
         except asyncio.CancelledError:
             raise
         except Exception:

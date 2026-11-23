@@ -72,7 +72,9 @@ class Settings(BaseSettings):
     # when unset and the database holds exactly one organization, that one is used.
     database_organization_id: UUID | None = None
     # Schema holding the tables (search_path).
-    database_schema: str = Field(default="public", pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+    database_schema: str = Field(
+        default="public", pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,62}$"
+    )
     # Optional agents.id to set on calls.agent_id.
     database_agent_id: UUID | None = None
     # invoices has no currency column: organizations.settings->>'currency'
@@ -89,15 +91,29 @@ class Settings(BaseSettings):
     }
     # Status values written to call_tasks.status / calls.status. They must
     # match the values the application that owns the schema expects.
-    database_task_status_queued: str = Field(default="queued", min_length=1, max_length=30)
-    database_task_status_in_progress: str = Field(default="in_progress", min_length=1, max_length=30)
-    database_task_status_completed: str = Field(default="completed", min_length=1, max_length=30)
+    database_task_status_queued: str = Field(
+        default="queued", min_length=1, max_length=30
+    )
+    database_task_status_in_progress: str = Field(
+        default="in_progress", min_length=1, max_length=30
+    )
+    database_task_status_completed: str = Field(
+        default="completed", min_length=1, max_length=30
+    )
     # calls: initiated (column default) while the session runs, then completed,
     # declined (customer asked to stop) or failed (technical failure).
-    database_call_status_in_progress: str = Field(default="initiated", min_length=1, max_length=30)
-    database_call_status_completed: str = Field(default="completed", min_length=1, max_length=30)
-    database_call_status_declined: str = Field(default="declined", min_length=1, max_length=30)
-    database_call_status_failed: str = Field(default="failed", min_length=1, max_length=30)
+    database_call_status_in_progress: str = Field(
+        default="initiated", min_length=1, max_length=30
+    )
+    database_call_status_completed: str = Field(
+        default="completed", min_length=1, max_length=30
+    )
+    database_call_status_declined: str = Field(
+        default="declined", min_length=1, max_length=30
+    )
+    database_call_status_failed: str = Field(
+        default="failed", min_length=1, max_length=30
+    )
 
     @field_validator("customers_json_path")
     @classmethod
@@ -106,7 +122,9 @@ class Settings(BaseSettings):
 
     @field_validator("database_invoice_status_map")
     @classmethod
-    def _non_empty_status_map(cls, value: dict[str, PaymentStatus]) -> dict[str, PaymentStatus]:
+    def _non_empty_status_map(
+        cls, value: dict[str, PaymentStatus]
+    ) -> dict[str, PaymentStatus]:
         if not value:
             raise ValueError("at least one open invoice status is required")
         return value

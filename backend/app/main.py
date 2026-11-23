@@ -8,7 +8,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Any
@@ -18,8 +18,9 @@ from fastapi import FastAPI, Request
 
 from app.api.routes import api_router
 from app.config import Settings, get_settings
+from app.schemas.session import TranscriptTurn
 from app.services import latency
-from app.services.azure_auth import build_async_credential, build_credential
+from app.services.azure_auth import build_async_credential
 from app.services.conversation import ConversationService
 from app.services.customer_repository import load_customers
 from app.services.database import (
@@ -60,7 +61,7 @@ def build_agent_connector(settings: Settings) -> AgentConnector | None:
     )
 
 
-def build_transcript_storage(
+async def build_transcript_storage(
     settings: Settings, database: PostgresStore | None = None
 ) -> TranscriptStorage:
     blob: BlobTranscriptStorage | None = None
@@ -76,7 +77,7 @@ def build_transcript_storage(
             # None keeps the storage's own DefaultAzureCredential (closed with it).
             credential=None
             if settings.azure_auth_method == "default"
-            else build_credential(settings),
+            else build_async_credential(settings),
         )
     if database is not None:
         logger.info("Sessions, outcomes and transcript turns are saved to PostgreSQL")
@@ -97,69 +98,86 @@ def create_app(
     today: Callable[[], date] | None = None,
     database: PostgresStore | None | object = _FROM_SETTINGS,
 ) -> FastAPI:
-    """Build the app. Tests inject `storage`, `connector`, `today` and `database`."""
+    """Build the app. Tests inject `storage`, `connector`, `today` and `database`.
+
+    The database, storage and services are created in the lifespan (startup),
+    because opening the async connection pool and loading the queue are awaited.
+    """
     settings = settings or get_settings()
 
-    db: PostgresStore | None = (
-        (PostgresStore.from_settings(settings) if settings.database_configured else None)
-        if database is _FROM_SETTINGS
-        else database  # type: ignore[assignment]
-    )
-    try:
-        if db is not None:
-            # The queue comes from call_tasks; sessions are calls rows (uuid ids).
-            db.recover_interrupted_sessions()
-            customers = db.load_queue()
-            manager_options: dict[str, Any] = {
-                "id_factory": lambda: str(uuid.uuid4()),
-                "on_session_start": db.session_started,
-                "allow_reset": False,
-            }
-        else:
-            # Fail fast at startup if the customer file is missing or invalid.
-            customers = load_customers(settings.customers_json_path)
-            manager_options = {}
-        transcript_storage = storage or build_transcript_storage(settings, db)
-    except Exception:
-        if db is not None:
-            db.close()
-        raise
-
-    agent_connector = (
-        build_agent_connector(settings) if connector is _FROM_SETTINGS else connector
-    )
-    business_tz = ZoneInfo(settings.business_timezone)
-    manager = SessionManager(customers, transcript_storage, **manager_options)
-    live_writer: LiveTranscriptWriter | None = None
-    if db is not None:
-        # Turns are saved to call_transcripts as they happen, not only at the end.
-        live_writer = LiveTranscriptWriter(
-            db, lambda sid: manager.get_conversation(sid).turns
-        )
-        manager.on_turns_changed = live_writer.notify
-    conversation = ConversationService(
-        manager,
-        agent_connector,  # type: ignore[arg-type]
-        organization=settings.agent_organization_name,
-        today=today or (lambda: datetime.now(business_tz).date()),
-        timeout_seconds=settings.azure_ai_agent_timeout_seconds,
-    )
-
-    # Read-only async reader for the live monitoring pages (needs the database).
-    monitoring: MonitoringStore | None = (
-        MonitoringStore.from_settings(settings, db.organization_id)
-        if isinstance(db, PostgresStore)
-        else None
-    )
-
-    followups = FollowUpScheduler(
-        manager, db, delay_seconds=settings.followup_delay_seconds
-    )
-
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        db: PostgresStore | None = (
+            (
+                await PostgresStore.from_settings(settings)
+                if settings.database_configured
+                else None
+            )
+            if database is _FROM_SETTINGS
+            else database  # type: ignore[assignment]
+        )
+        try:
+            if db is not None:
+                # The queue comes from call_tasks; sessions are calls rows (uuid ids).
+                await db.recover_interrupted_sessions()
+                customers = await db.load_queue()
+                manager_options: dict[str, Any] = {
+                    "id_factory": lambda: str(uuid.uuid4()),
+                    "on_session_start": db.session_started,
+                    "allow_reset": False,
+                }
+            else:
+                # Fail fast at startup if the customer file is missing or invalid.
+                customers = await load_customers(settings.customers_json_path)
+                manager_options = {}
+            transcript_storage = storage or await build_transcript_storage(settings, db)
+        except Exception:
+            if db is not None:
+                await db.close()
+            raise
+
+        agent_connector = (
+            build_agent_connector(settings)
+            if connector is _FROM_SETTINGS
+            else connector
+        )
+        business_tz = ZoneInfo(settings.business_timezone)
+        manager = SessionManager(customers, transcript_storage, **manager_options)
+        live_writer: LiveTranscriptWriter | None = None
+        if db is not None:
+            # Turns are saved to call_transcripts as they happen, not only at the end.
+            async def current_turns(session_id: str) -> Sequence[TranscriptTurn]:
+                return (await manager.get_conversation(session_id)).turns
+
+            live_writer = LiveTranscriptWriter(db, current_turns)
+            manager.on_turns_changed = live_writer.notify
+        conversation = ConversationService(
+            manager,
+            agent_connector,  # type: ignore[arg-type]
+            organization=settings.agent_organization_name,
+            today=today or (lambda: datetime.now(business_tz).date()),
+            timeout_seconds=settings.azure_ai_agent_timeout_seconds,
+        )
+
+        # Read-only async reader for the live monitoring pages (needs the database).
+        monitoring: MonitoringStore | None = (
+            MonitoringStore.from_settings(settings, db.organization_id)
+            if isinstance(db, PostgresStore)
+            else None
+        )
+
+        followups = FollowUpScheduler(
+            manager, db, delay_seconds=settings.followup_delay_seconds
+        )
+
+        app.state.session_manager = manager
+        app.state.conversation_service = conversation
+        app.state.followup_scheduler = followups
+        app.state.monitoring = monitoring
+        app.state.database = db
+
         if live_writer is not None:
-            live_writer.start()
+            await live_writer.start()
         if monitoring is not None:
             await monitoring.open()
         yield
@@ -171,27 +189,29 @@ def create_app(
         await conversation.close_all()
         if agent_connector is not None:
             await agent_connector.aclose()  # type: ignore[union-attr]
-        transcript_storage.close()
+        await transcript_storage.close()
         if db is not None:
-            db.close()
+            await db.close()
 
-    app = FastAPI(title="Payment Follow-up Agent PoC", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(
+        title="Payment Follow-up Agent PoC", version="0.2.0", lifespan=lifespan
+    )
     app.state.settings = settings
-    app.state.session_manager = manager
-    app.state.conversation_service = conversation
-    app.state.followup_scheduler = followups
-    app.state.monitoring = monitoring
     app.include_router(api_router)
 
     @app.middleware("http")
-    async def log_request_latency(request: Request, call_next: Callable[[Request], Any]) -> Any:
+    async def log_request_latency(
+        request: Request, call_next: Callable[[Request], Any]
+    ) -> Any:
         started = time.monotonic()
         response = await call_next(request)
         elapsed_ms = (time.monotonic() - started) * 1000
         logger.info(
             "latency http_ms=%d %s %s -> %d",
             elapsed_ms,
-            request.method, request.url.path, response.status_code,
+            request.method,
+            request.url.path,
+            response.status_code,
         )
         # The dashboard's own polling is left out so it does not drown real traffic.
         if not request.url.path.startswith("/api/monitoring"):
@@ -204,12 +224,13 @@ def create_app(
     # /api/health is reachable through the Next.js /api proxy for the dashboard.
     @app.get("/health", tags=["health"])
     @app.get("/api/health", tags=["health"])
-    def health() -> dict[str, object]:
+    async def health(request: Request) -> dict[str, object]:
+        state = request.app.state
         return {
             "status": "ok",
-            "agent_configured": conversation.configured,
-            "transcript_storage": manager.storage_kind,
-            "customer_source": "postgres" if db is not None else "json",
+            "agent_configured": state.conversation_service.configured,
+            "transcript_storage": state.session_manager.storage_kind,
+            "customer_source": "postgres" if state.database is not None else "json",
         }
 
     return app

@@ -5,13 +5,17 @@ from pathlib import Path
 import pytest
 
 from app.config import REPO_ROOT
-from app.services.customer_repository import CustomerDataError, load_customers, parse_customers
+from app.services.customer_repository import (
+    CustomerDataError,
+    load_customers,
+    parse_customers,
+)
 
 from .conftest import SAMPLE_ORDER
 
 
-def test_repository_customer_file_is_valid() -> None:
-    customers = load_customers(REPO_ROOT / "data" / "customers.json")
+async def test_repository_customer_file_is_valid() -> None:
+    customers = await load_customers(REPO_ROOT / "data" / "customers.json")
     assert len(customers) >= 2
     assert customers[0].customer_id == "cust_demo_001"
     assert customers[0].invoice.invoice_number == "INV-1001"
@@ -28,9 +32,9 @@ def test_parse_converts_types(sample_records) -> None:
     assert customer.invoice.amount_due == 100.5
 
 
-def test_load_missing_file_raises(tmp_path: Path) -> None:
+async def test_load_missing_file_raises(tmp_path: Path) -> None:
     with pytest.raises(CustomerDataError, match="Cannot read"):
-        load_customers(tmp_path / "missing.json")
+        await load_customers(tmp_path / "missing.json")
 
 
 @pytest.mark.parametrize(
@@ -89,6 +93,8 @@ def test_parse_rejects_duplicate_customer_id(sample_records) -> None:
 
 
 def test_parse_rejects_duplicate_invoice_id(sample_records) -> None:
-    sample_records[2]["invoice"]["invoice_id"] = sample_records[0]["invoice"]["invoice_id"]
+    sample_records[2]["invoice"]["invoice_id"] = sample_records[0]["invoice"][
+        "invoice_id"
+    ]
     with pytest.raises(CustomerDataError, match="Duplicate invoice_id"):
         parse_customers(json.dumps(sample_records))
