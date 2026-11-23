@@ -768,3 +768,54 @@ html { font-size: 14px; }
   .sidebar-toggle { display: none; }
   .logo-full { max-width: 140px; }
 }
+
+/* --- Live monitoring pages --- */
+.live-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
+.live-toolbar .eyebrow { margin: 0 auto 0 0; }
+.live-status { display: inline-flex; align-items: center; gap: 6px; }
+.live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success); margin-right: 6px; animation: live-pulse 1.8s ease-in-out infinite; }
+.live-dot-off { background: var(--danger); animation: none; }
+@keyframes live-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+.live-filter select { font: inherit; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: inherit; }
+.live-scroll { overflow-x: auto; }
+.live-pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+.live-pager .muted { margin-right: auto; }
+.live-json { display: inline-block; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; font-size: 0.78rem; }
+
+/* --- Live tables --- */
+.live-scroll { border: 1px solid var(--border); border-radius: 12px; margin-top: 4px; }
+.live-table { margin-top: 0; border-collapse: separate; border-spacing: 0; }
+.live-table th { position: sticky; top: 0; padding: 12px 14px; white-space: nowrap; color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, var(--surface)); border-bottom: 1px solid var(--border); }
+.live-table th:first-child { border-top-left-radius: 11px; }
+.live-table th:last-child { border-top-right-radius: 11px; }
+.live-table td { padding: 12px 14px; white-space: nowrap; }
+.live-table tbody tr { transition: background 0.12s ease; }
+.live-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--primary) 3%, transparent); }
+.live-table tbody tr:hover { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+.id-chip { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.78rem; padding: 3px 8px; border-radius: 6px; color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, transparent); border: 1px solid color-mix(in srgb, var(--primary) 22%, transparent); }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 0.78rem; font-weight: 600; padding: 3px 10px; border-radius: 999px; color: var(--tone); background: color-mix(in srgb, var(--tone) 13%, transparent); }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--tone); }
+.pill-neutral { --tone: var(--muted); }
+.pill-ok { --tone: var(--success); }
+.pill-bad { --tone: var(--danger); }
+.pill-warn { --tone: var(--warning); }
+.pill-live { --tone: var(--primary); }
+.pill-live::before { animation: live-pulse 1.4s ease-in-out infinite; }
+.json-chip { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.74rem; padding: 3px 8px; border-radius: 6px; color: var(--muted); background: color-mix(in srgb, var(--muted) 10%, transparent); max-width: 320px; display: inline-block; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+
+button.json-chip { border: 0; cursor: pointer; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; }
+button.json-chip:hover { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
+button.json-chip:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.json-dialog { margin: auto; width: min(640px, calc(100vw - 32px)); max-height: 80vh; padding: 20px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: var(--foreground); box-shadow: 0 20px 60px rgba(20, 20, 43, 0.3); }
+.json-dialog::backdrop { background: rgba(15, 14, 26, 0.55); }
+.json-dialog-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.json-dialog-head .eyebrow { margin: 0 auto 0 0; }
+.json-dialog-body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; overflow: auto; max-height: calc(80vh - 100px); padding: 14px; border-radius: 10px; background: color-mix(in srgb, var(--primary) 6%, var(--surface)); border: 1px solid var(--border); }
+
+.live-table td .transcript-text { display: block; white-space: normal; min-width: 260px; max-width: 560px; line-height: 1.45; }
+
+/* --- Latency page --- */
+.latency-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.latency-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.latency-big { font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; margin: 8px 0 2px; font-variant-numeric: tabular-nums; }

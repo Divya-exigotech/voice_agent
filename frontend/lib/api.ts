@@ -1,9 +1,19 @@
 import type {
+  AuditLogItem,
+  CallActionItem,
+  CallEventItem,
+  CallItem,
+  CallTaskItem,
+  CallTranscriptItem,
   ChatResponse,
   CustomerListResponse,
   FinalizeSessionRequest,
   FinalizeSessionResponse,
   Health,
+  LatencySampleItem,
+  LatencySummary,
+  MonitoringSummary,
+  Page,
   QueueState,
   SessionRecord,
   TranscriptDocument,
@@ -49,6 +59,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+function pageQuery(limit: number, offset: number, filter?: string, filterKey = "status"): string {
+  const q = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (filter) q.set(filterKey, filter);
+  return `?${q.toString()}`;
+}
+
 export const api = {
   getHealth: () => request<Health>("/health"),
 
@@ -80,6 +96,32 @@ export const api = {
   /** Saved transcript, read back from storage (Azure Blob) through the backend. */
   getTranscript: (sessionId: string) =>
     request<TranscriptDocument>(`/sessions/${encodeURIComponent(sessionId)}/transcript`),
+
+  // Live monitoring (read-only; needs the PostgreSQL database).
+  getMonitoringSummary: () => request<MonitoringSummary>("/monitoring/summary"),
+  listCalls: (limit: number, offset: number, filter?: string) =>
+    request<Page<CallItem>>(`/monitoring/calls${pageQuery(limit, offset, filter)}`),
+  listCallTasks: (limit: number, offset: number, filter?: string) =>
+    request<Page<CallTaskItem>>(`/monitoring/call-tasks${pageQuery(limit, offset, filter)}`),
+  listCallEvents: (limit: number, offset: number, filter?: string) =>
+    request<Page<CallEventItem>>(
+      `/monitoring/call-events${pageQuery(limit, offset, filter, "event_type")}`,
+    ),
+  listCallActions: (limit: number, offset: number, filter?: string) =>
+    request<Page<CallActionItem>>(
+      `/monitoring/call-actions${pageQuery(limit, offset, filter, "action_type")}`,
+    ),
+  listCallTranscripts: (limit: number, offset: number, filter?: string) =>
+    request<Page<CallTranscriptItem>>(
+      `/monitoring/call-transcripts${pageQuery(limit, offset, filter, "speaker")}`,
+    ),
+  getLatencySummary: () => request<LatencySummary>("/monitoring/latency/summary"),
+  listLatencySamples: (limit: number, offset: number, filter?: string) =>
+    request<Page<LatencySampleItem>>(
+      `/monitoring/latency/samples${pageQuery(limit, offset, filter, "metric")}`,
+    ),
+  listAuditLogs: (limit: number, offset: number) =>
+    request<Page<AuditLogItem>>(`/monitoring/audit-logs${pageQuery(limit, offset)}`),
 
   resetQueue: () => request<QueueState>("/queue/reset", { method: "POST" }),
 };

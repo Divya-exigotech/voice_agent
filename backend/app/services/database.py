@@ -45,6 +45,7 @@ from app.schemas.session import (
     TranscriptDocument,
     TranscriptTurn,
 )
+from app.services import latency
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -276,6 +277,10 @@ class PostgresStore:
             agent_id=settings.database_agent_id,
         )
 
+    @property
+    def organization_id(self) -> UUID:
+        return self._org
+
     def close(self) -> None:
         self._pool.close()
 
@@ -413,7 +418,11 @@ class PostgresStore:
         try:
             self._session_started(record)
         finally:
-            logger.info("latency db_session_start_ms=%d", (time.monotonic() - started) * 1000)
+            elapsed_ms = (time.monotonic() - started) * 1000
+            logger.info("latency db_session_start_ms=%d", elapsed_ms)
+            latency.recorder.record(
+                latency.DB_SESSION_START, elapsed_ms, session_id=record.session_id
+            )
 
     def _session_started(self, record: SessionRecord) -> None:
         """Claim the call task and create the calls row (one transaction).
@@ -470,7 +479,11 @@ class PostgresStore:
         try:
             self._save_session(document, transcript_blob)
         finally:
-            logger.info("latency db_final_save_ms=%d", (time.monotonic() - started) * 1000)
+            elapsed_ms = (time.monotonic() - started) * 1000
+            logger.info("latency db_final_save_ms=%d", elapsed_ms)
+            latency.recorder.record(
+                latency.DB_FINAL_SAVE, elapsed_ms, session_id=document.session_id
+            )
 
     def _save_session(self, document: TranscriptDocument, transcript_blob: str | None) -> None:
         """Record the end of a session (one transaction).
@@ -821,9 +834,13 @@ class LiveTranscriptWriter:
                 turns = self._get_turns(session_id)
                 started = time.monotonic()
                 await asyncio.to_thread(self._store.save_live_transcript, session_id, turns)
+                elapsed_ms = (time.monotonic() - started) * 1000
                 logger.info(
                     "Live transcript saved for %s (%d turn(s)) latency db_live_write_ms=%d",
-                    session_id, len(turns), (time.monotonic() - started) * 1000,
+                    session_id, len(turns), elapsed_ms,
+                )
+                latency.recorder.record(
+                    latency.DB_LIVE_WRITE, elapsed_ms, session_id=session_id
                 )
             except Exception:
                 logger.warning("Live transcript write failed for %s", session_id, exc_info=True)

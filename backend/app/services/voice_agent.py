@@ -28,6 +28,7 @@ from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from app.services import latency
 from app.services.agent_prompt import RECORD_OUTCOME_TOOL, RECORD_OUTCOME_TOOL_NAME
 
 logger = logging.getLogger(__name__)
@@ -349,10 +350,12 @@ class LiveAgentSession:
             self._ready.set()
         elif kind == "response.output_audio.delta":
             if self._speech_stopped_at is not None:
+                reply_ms = (time.monotonic() - self._speech_stopped_at) * 1000
                 logger.info(
                     "latency voice_reply_ms=%d (customer stopped speaking -> first agent audio)",
-                    (time.monotonic() - self._speech_stopped_at) * 1000,
+                    reply_ms,
                 )
+                latency.recorder.record(latency.VOICE_REPLY, reply_ms)
                 self._speech_stopped_at = None
             try:
                 self._emit(audio_bytes(event_value(event, "delta")))

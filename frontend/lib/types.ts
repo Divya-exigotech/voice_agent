@@ -148,3 +148,114 @@ export type UiSessionStatus =
   | "ending"
   | "completed"
   | "failed";
+
+// --- Live monitoring (backend/app/schemas/monitoring.py) ---------------------
+
+export interface Page<T> {
+  total: number;
+  items: T[];
+}
+
+export interface CallItem {
+  call_id: string;
+  client_id: string;
+  client_name: string | null;
+  status: string;
+  duration_seconds: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CallTaskItem {
+  task_id: string;
+  client_id: string;
+  client_name: string | null;
+  status: string;
+  scheduled_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CallEventItem {
+  event_id: string;
+  call_id: string;
+  client_name: string | null;
+  event_type: string;
+  event_data: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface CallActionItem {
+  action_id: string;
+  call_id: string;
+  client_name: string | null;
+  action_type: string;
+  action_status: string;
+  result: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface CallTranscriptItem {
+  transcript_id: string;
+  call_id: string;
+  client_name: string | null;
+  speaker: string;
+  text: string;
+  timestamp: string;
+}
+
+export interface LatencyStatItem {
+  metric: string;
+  count: number;
+  average_ms: number | null;
+  min_ms: number | null;
+  max_ms: number | null;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  last_ms: number | null;
+  last_at: string | null;
+}
+
+export interface LatencySummary {
+  generated_at: string;
+  metrics: LatencyStatItem[];
+}
+
+export interface LatencySampleItem {
+  seq: number;
+  metric: string;
+  milliseconds: number;
+  at: string;
+  label: string | null;
+  session_id: string | null;
+}
+
+export interface AuditLogItem {
+  audit_id: string;
+  actor: string;
+  action: string;
+  timestamp: string;
+}
+
+export interface CountBucket {
+  key: string;
+  count: number;
+}
+
+export interface MonitoringSummary {
+  generated_at: string;
+  total_calls: number;
+  calls_today: number;
+  active_calls: number;
+  completed_calls: number;
+  failed_calls: number;
+  declined_calls: number;
+  average_duration_seconds: number | null;
+  total_tasks: number;
+  total_events: number;
+  total_actions: number;
+  total_audit_logs: number;
+  calls_by_status: CountBucket[];
+  tasks_by_status: CountBucket[];
+  outcomes: CountBucket[];
+}
