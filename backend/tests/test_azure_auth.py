@@ -1,7 +1,7 @@
 import asyncio
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from pydantic import ValidationError
@@ -19,7 +19,9 @@ SCOPE = "https://ai.azure.com/.default"
 
 
 class FakeRecord:
-    def __init__(self, tenant_id: str = "tenant-a", username: str = "me@example.com") -> None:
+    def __init__(
+        self, tenant_id: str = "tenant-a", username: str = "me@example.com"
+    ) -> None:
         self.tenant_id = tenant_id
         self.username = username
 
@@ -33,7 +35,7 @@ class FakeRecord:
 
 
 class FakeBrowserCredential:
-    instances: list["FakeBrowserCredential"] = []
+    instances: ClassVar[list["FakeBrowserCredential"]] = []
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
@@ -59,7 +61,9 @@ def fake_identity(monkeypatch: pytest.MonkeyPatch) -> type[FakeBrowserCredential
     import azure.identity
 
     FakeBrowserCredential.instances = []
-    monkeypatch.setattr(azure.identity, "InteractiveBrowserCredential", FakeBrowserCredential)
+    monkeypatch.setattr(
+        azure.identity, "InteractiveBrowserCredential", FakeBrowserCredential
+    )
     monkeypatch.setattr(azure.identity, "AuthenticationRecord", FakeRecord)
     return FakeBrowserCredential
 
@@ -93,7 +97,9 @@ def test_client_secret_builds_service_principal_credentials() -> None:
     assert isinstance(asyncio.run(build()), AsyncClientSecretCredential)
 
 
-def test_browser_signs_in_once_and_saves_record(tmp_path: Path, fake_identity: Any) -> None:
+def test_browser_signs_in_once_and_saves_record(
+    tmp_path: Path, fake_identity: Any
+) -> None:
     record_path = tmp_path / "record.json"
     credential = BrowserSignInCredential(record_path=record_path)
 
@@ -106,7 +112,9 @@ def test_browser_signs_in_once_and_saves_record(tmp_path: Path, fake_identity: A
     assert record_path.read_text(encoding="utf-8") == "tenant-a|me@example.com"
 
 
-def test_browser_reuses_saved_record_without_prompting(tmp_path: Path, fake_identity: Any) -> None:
+def test_browser_reuses_saved_record_without_prompting(
+    tmp_path: Path, fake_identity: Any
+) -> None:
     record_path = tmp_path / "record.json"
     record_path.write_text("tenant-a|me@example.com", encoding="utf-8")
 
@@ -119,7 +127,9 @@ def test_browser_reuses_saved_record_without_prompting(tmp_path: Path, fake_iden
     assert inner.kwargs["tenant_id"] == "tenant-a"
 
 
-def test_browser_ignores_record_from_another_tenant(tmp_path: Path, fake_identity: Any) -> None:
+def test_browser_ignores_record_from_another_tenant(
+    tmp_path: Path, fake_identity: Any
+) -> None:
     record_path = tmp_path / "record.json"
     record_path.write_text("tenant-a|me@example.com", encoding="utf-8")
 
@@ -141,9 +151,13 @@ def test_browser_ignores_corrupt_record(tmp_path: Path, fake_identity: Any) -> N
     assert fake_identity.instances[0].authenticate_calls == 1
 
 
-def test_browser_concurrent_requests_open_one_browser(tmp_path: Path, fake_identity: Any) -> None:
+def test_browser_concurrent_requests_open_one_browser(
+    tmp_path: Path, fake_identity: Any
+) -> None:
     credential = BrowserSignInCredential(record_path=tmp_path / "record.json")
-    threads = [threading.Thread(target=credential.get_token, args=(SCOPE,)) for _ in range(5)]
+    threads = [
+        threading.Thread(target=credential.get_token, args=(SCOPE,)) for _ in range(5)
+    ]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -153,9 +167,13 @@ def test_browser_concurrent_requests_open_one_browser(tmp_path: Path, fake_ident
     assert fake_identity.instances[0].token_calls == 5
 
 
-def test_build_browser_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_identity: Any) -> None:
+def test_build_browser_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_identity: Any
+) -> None:
     monkeypatch.setattr(azure_auth, "AUTH_RECORD_PATH", tmp_path / "record.json")
-    settings = isolated_settings(azure_auth_method="browser", azure_tenant_id="tenant-x")
+    settings = isolated_settings(
+        azure_auth_method="browser", azure_tenant_id="tenant-x"
+    )
 
     assert isinstance(build_async_credential(settings), AsyncCredentialAdapter)
     assert isinstance(build_credential(settings), BrowserSignInCredential)

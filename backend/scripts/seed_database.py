@@ -28,7 +28,7 @@ async def seed() -> None:
     settings = get_settings()
     if settings.database_url is None:
         raise SystemExit("DATABASE_URL is not set")
-    customers = load_customers(settings.customers_json_path)
+    customers = await load_customers(settings.customers_json_path)
     # app payment status -> invoices.status (inverse of the configured map).
     invoice_status = {v: k for k, v in settings.database_invoice_status_map.items()}
     queued = settings.database_task_status_queued
@@ -41,7 +41,11 @@ async def seed() -> None:
     ) as conn:
         cur = await conn.execute(
             "SELECT id FROM organizations WHERE id = %s OR name = %s ORDER BY (id = %s) DESC LIMIT 1",
-            (settings.database_organization_id, ORGANIZATION_NAME, settings.database_organization_id),
+            (
+                settings.database_organization_id,
+                ORGANIZATION_NAME,
+                settings.database_organization_id,
+            ),
         )
         row = await cur.fetchone()
         if row is None:
@@ -107,14 +111,24 @@ async def seed() -> None:
                     WHERE organization_id = %s AND client_id = %s AND status = %s
                 )
                 """,
-                (org_id, client_id, start + timedelta(seconds=index), queued, org_id, client_id, queued),
+                (
+                    org_id,
+                    client_id,
+                    start + timedelta(seconds=index),
+                    queued,
+                    org_id,
+                    client_id,
+                    queued,
+                ),
             )
             created_tasks += cur.rowcount
         await conn.commit()
 
     logger.info(
         "Seeded organization %s: %d client(s)/invoice(s), %d new call task(s)",
-        org_id, len(customers), created_tasks,
+        org_id,
+        len(customers),
+        created_tasks,
     )
 
 

@@ -56,10 +56,14 @@ async def main(args: argparse.Namespace) -> int:
         print("[FAIL] Set AZURE_AI_PROJECT_ENDPOINT and AZURE_AI_AGENT_NAME in .env")
         return 1
 
-    scenarios = [SCENARIOS_BY_ID[s] for s in args.scenario] if args.scenario else list(SCENARIOS)
+    scenarios = (
+        [SCENARIOS_BY_ID[s] for s in args.scenario]
+        if args.scenario
+        else list(SCENARIOS)
+    )
     if args.tag:
         scenarios = [s for s in scenarios if args.tag in s.tags]
-    customers = load_customers(settings.customers_json_path)
+    customers = await load_customers(settings.customers_json_path)
     customer = customers[args.customer_index]
     today = datetime.now(ZoneInfo(settings.business_timezone)).date()
 
@@ -105,21 +109,42 @@ async def main(args: argparse.Namespace) -> int:
         ),
         encoding="utf-8",
     )
-    print(f"\nSummary: {counts['pass']} passed, {counts['warn']} warnings, {counts['fail']} failed")
+    print(
+        f"\nSummary: {counts['pass']} passed, {counts['warn']} warnings, {counts['fail']} failed"
+    )
     print(f"Report: {report_path}")
     return 1 if counts["fail"] else 0
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("-s", "--scenario", action="append", choices=sorted(SCENARIOS_BY_ID), help="Scenario id (repeatable)")
-    parser.add_argument("--tag", choices=["outcome", "safety", "privacy", "grounding"], help="Only scenarios with this tag")
-    parser.add_argument("--customer-index", type=int, default=0, help="Customer from data/customers.json (default 0)")
+    parser.add_argument(
+        "-s",
+        "--scenario",
+        action="append",
+        choices=sorted(SCENARIOS_BY_ID),
+        help="Scenario id (repeatable)",
+    )
+    parser.add_argument(
+        "--tag",
+        choices=["outcome", "safety", "privacy", "grounding"],
+        help="Only scenarios with this tag",
+    )
+    parser.add_argument(
+        "--customer-index",
+        type=int,
+        default=0,
+        help="Customer from data/customers.json (default 0)",
+    )
     parser.add_argument("--list", action="store_true", help="List scenarios and exit")
     parsed = parser.parse_args()
     if parsed.list:
         for s in SCENARIOS:
-            expected = ", ".join(sorted(s.expected_outcomes)) if s.expected_outcomes else "any (safety checks)"
+            expected = (
+                ", ".join(sorted(s.expected_outcomes))
+                if s.expected_outcomes
+                else "any (safety checks)"
+            )
             print(f"{s.id:<22} {s.title}  [expects: {expected}]")
         sys.exit(0)
     sys.exit(asyncio.run(main(parsed)))

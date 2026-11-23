@@ -49,7 +49,7 @@ async def _send_to_browser(websocket: WebSocket, outbox: "asyncio.Queue[Any]") -
                 await websocket.send_bytes(bytes(item))
             else:
                 await websocket.send_text(json.dumps(item))
-        except Exception:
+        except Exception:  # noqa: BLE001 - any send failure means the browser went away
             return  # browser went away; the receive loop will notice
 
 
@@ -72,7 +72,10 @@ async def voice_session(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=code)
 
     outbox: asyncio.Queue[Any] = asyncio.Queue()
-    sink = outbox.put_nowait
+
+    async def sink(event: Any) -> None:
+        outbox.put_nowait(event)
+
     try:
         await service.attach_voice(session_id, sink)
     except SessionNotFoundError:
@@ -110,7 +113,7 @@ async def voice_session(websocket: WebSocket, session_id: str) -> None:
         outbox.put_nowait({"type": "error", "message": f"Voice agent error: {exc}"})
         close_code = CLOSE_AGENT_ERROR
     finally:
-        service.detach_voice(session_id, sink)
+        await service.detach_voice(session_id, sink)
         outbox.put_nowait(_END)
         with contextlib.suppress(Exception):
             await asyncio.wait_for(sender, timeout=2)

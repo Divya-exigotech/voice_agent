@@ -29,7 +29,9 @@ def start(client: TestClient) -> str:
 
 
 def connect(client: TestClient, session_id: str, origin: str = ORIGIN):
-    return client.websocket_connect(f"/api/sessions/{session_id}/voice", headers={"origin": origin})
+    return client.websocket_connect(
+        f"/api/sessions/{session_id}/voice", headers={"origin": origin}
+    )
 
 
 def next_message(ws) -> Any:
@@ -61,16 +63,29 @@ def wait_closed(ws, limit: int = 30) -> int:
 
 
 def is_transcript(n: int):
-    return lambda m: isinstance(m, dict) and m.get("type") == "transcript" and len(m["transcript"]) == n
+    return lambda m: (
+        isinstance(m, dict)
+        and m.get("type") == "transcript"
+        and len(m["transcript"]) == n
+    )
 
 
-def test_agent_speaks_first_with_audio_and_transcript(client, fake_agent: FakeConnector) -> None:
-    fake_agent.script = [[agent_audio(b"\x01\x00\x02\x00"), *agent_says("Hello Charlie.")]]
+def test_agent_speaks_first_with_audio_and_transcript(
+    client, fake_agent: FakeConnector
+) -> None:
+    fake_agent.script = [
+        [agent_audio(b"\x01\x00\x02\x00"), *agent_says("Hello Charlie.")]
+    ]
     sid = start(client)
 
     with connect(client, sid) as ws:
         ready = next_message(ws)
-        assert ready == {"type": "ready", "transcript": [], "proposed_outcome": None, "review_flags": []}
+        assert ready == {
+            "type": "ready",
+            "transcript": [],
+            "proposed_outcome": None,
+            "review_flags": [],
+        }
         seen = receive_until(ws, is_transcript(1))
 
     assert b"\x01\x00\x02\x00" in seen  # agent audio relayed as binary PCM
@@ -81,12 +96,21 @@ def test_agent_speaks_first_with_audio_and_transcript(client, fake_agent: FakeCo
     assert conn.creates == 1
 
 
-def test_spoken_conversation_with_outcome_and_finalize(client, fake_agent: FakeConnector) -> None:
-    fake_agent.script = [agent_says("Hello."), agent_says("Thank you, noted for Friday.")]
-    fake_agent.audio_script = [[
-        *user_speaks("I will pay on Friday"),
-        *agent_calls_tool({"outcome": "payment_promised", "promised_payment_date": "2026-11-20"}),
-    ]]
+def test_spoken_conversation_with_outcome_and_finalize(
+    client, fake_agent: FakeConnector
+) -> None:
+    fake_agent.script = [
+        agent_says("Hello."),
+        agent_says("Thank you, noted for Friday."),
+    ]
+    fake_agent.audio_script = [
+        [
+            *user_speaks("I will pay on Friday"),
+            *agent_calls_tool(
+                {"outcome": "payment_promised", "promised_payment_date": "2026-11-20"}
+            ),
+        ]
+    ]
     sid = start(client)
 
     with connect(client, sid) as ws:
@@ -101,9 +125,13 @@ def test_spoken_conversation_with_outcome_and_finalize(client, fake_agent: FakeC
             ("agent", "Thank you, noted for Friday."),
         ]
         assert final_transcript["proposed_outcome"]["outcome"] == "payment_promised"
-        assert {"type": "speech_started"} in seen  # browser flushes agent audio (barge-in)
+        assert {
+            "type": "speech_started"
+        } in seen  # browser flushes agent audio (barge-in)
 
-        res = client.post(f"/api/sessions/{sid}/transcript", json={"session_status": "completed"})
+        res = client.post(
+            f"/api/sessions/{sid}/transcript", json={"session_status": "completed"}
+        )
         assert res.status_code == 200
         body = res.json()
         assert body["session"]["outcome"] == "payment_promised"
@@ -114,7 +142,8 @@ def test_spoken_conversation_with_outcome_and_finalize(client, fake_agent: FakeC
     conn = fake_agent.connections[0]
     assert conn.audio == [PCM_FRAME]
     assert conn.exited is True
-    doc = client.app.state.session_manager._storage.load(body["session"]["transcript_ref"])
+    storage = client.app.state.session_manager._storage
+    doc = client.portal.call(storage.load, body["session"]["transcript_ref"])
     assert [t.speaker for t in doc.transcript] == ["agent", "user", "agent"]
 
 
@@ -131,7 +160,9 @@ def test_invalid_audio_frames_are_ignored(client, fake_agent: FakeConnector) -> 
     assert fake_agent.connections[0].audio == [PCM_FRAME]
 
 
-def test_stop_detaches_browser_but_keeps_agent_session(client, fake_agent: FakeConnector) -> None:
+def test_stop_detaches_browser_but_keeps_agent_session(
+    client, fake_agent: FakeConnector
+) -> None:
     sid = start(client)
     with connect(client, sid) as ws:
         receive_until(ws, is_transcript(1))
@@ -144,7 +175,9 @@ def test_stop_detaches_browser_but_keeps_agent_session(client, fake_agent: FakeC
     assert len(fake_agent.connections) == 1
 
 
-def test_reconnecting_browser_gets_transcript_without_new_opening(client, fake_agent: FakeConnector) -> None:
+def test_reconnecting_browser_gets_transcript_without_new_opening(
+    client, fake_agent: FakeConnector
+) -> None:
     sid = start(client)
     with connect(client, sid) as ws:
         receive_until(ws, is_transcript(1))
@@ -155,25 +188,33 @@ def test_reconnecting_browser_gets_transcript_without_new_opening(client, fake_a
     assert fake_agent.connections[0].creates == 1  # opening not repeated
 
 
-def test_agent_disconnect_is_reported_to_browser(client, fake_agent: FakeConnector) -> None:
+def test_agent_disconnect_is_reported_to_browser(
+    client, fake_agent: FakeConnector
+) -> None:
     fake_agent.audio_script = [[ConnectionResetError("network down")]]
     sid = start(client)
     with connect(client, sid) as ws:
         receive_until(ws, is_transcript(1))
         ws.send_bytes(PCM_FRAME)
-        closed = receive_until(ws, lambda m: isinstance(m, dict) and m.get("type") == "agent_closed")
+        closed = receive_until(
+            ws, lambda m: isinstance(m, dict) and m.get("type") == "agent_closed"
+        )
         assert "network down" in closed[-1]["reason"]
         ws.send_bytes(PCM_FRAME)  # agent gone: server reports and closes
-        error = receive_until(ws, lambda m: isinstance(m, dict) and m.get("type") == "error")
+        error = receive_until(
+            ws, lambda m: isinstance(m, dict) and m.get("type") == "error"
+        )
         assert "not connected" in error[-1]["message"]
         assert wait_closed(ws) == 4502
 
 
 def test_cross_site_origin_is_rejected(client) -> None:
     sid = start(client)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with connect(client, sid, origin="https://evil.example"):
-            pass
+    with (
+        pytest.raises(WebSocketDisconnect) as exc,
+        connect(client, sid, origin="https://evil.example"),
+    ):
+        pass
     assert exc.value.code == 4403
 
 
@@ -185,7 +226,9 @@ def test_unknown_or_ended_session(client, session, code, message) -> None:
     sid = "missing"
     if session == "ended":
         sid = start(client)
-        client.post(f"/api/sessions/{sid}/transcript", json={"session_status": "completed"})
+        client.post(
+            f"/api/sessions/{sid}/transcript", json={"session_status": "completed"}
+        )
     with connect(client, sid) as ws:
         error = next_message(ws)
         assert error["type"] == "error" and message in error["message"]
@@ -193,7 +236,11 @@ def test_unknown_or_ended_session(client, session, code, message) -> None:
 
 
 def test_agent_not_configured(customers_file: Path) -> None:
-    app = create_app(isolated_settings(customers_json_path=customers_file), connector=None, today=lambda: TODAY)
+    app = create_app(
+        isolated_settings(customers_json_path=customers_file),
+        connector=None,
+        today=lambda: TODAY,
+    )
     with TestClient(app) as client:
         sid = start(client)
         with connect(client, sid) as ws:

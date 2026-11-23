@@ -7,7 +7,6 @@ Rows written by the voice sessions show up here as soon as they are committed.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -32,7 +31,7 @@ from app.schemas.monitoring import (
 from app.services.database import OUTCOME_ACTION, DatabaseError, StatusValues
 
 if TYPE_CHECKING:
-    from psycopg_pool import ConnectionPool
+    from psycopg_pool import AsyncConnectionPool
 
     from app.config import Settings
 
@@ -44,7 +43,7 @@ class MonitoringStore:
 
     def __init__(
         self,
-        pool: ConnectionPool,
+        pool: AsyncConnectionPool,
         *,
         organization_id: UUID,
         statuses: StatusValues,
@@ -59,11 +58,11 @@ class MonitoringStore:
     ) -> MonitoringStore:
         """Build the store; the pool is opened later with `open()`."""
         from psycopg.rows import dict_row
-        from psycopg_pool import ConnectionPool
+        from psycopg_pool import AsyncConnectionPool
 
         if settings.database_url is None:
             raise DatabaseError("DATABASE_URL is required")
-        pool = ConnectionPool(
+        pool = AsyncConnectionPool(
             conninfo=settings.database_url.get_secret_value(),
             min_size=1,
             max_size=3,
@@ -84,20 +83,17 @@ class MonitoringStore:
 
     async def open(self) -> None:
         # Do not wait: the app must start even when the database is briefly down.
-        self._pool.open(wait=False)
+        await self._pool.open(wait=False)
 
     async def aclose(self) -> None:
-        await asyncio.to_thread(self._pool.close)
-
-    def _run(self, sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-        with self._pool.connection() as conn:
-            return conn.execute(sql, params).fetchall()
+        await self._pool.close()
 
     async def _fetch(self, sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-        # psycopg's async mode cannot run on Windows' default event loop, so the
-        # blocking driver runs in a worker thread and the event loop stays free.
+        # On Windows psycopg's async mode needs the selector event loop (see database.py).
         try:
-            return await asyncio.to_thread(self._run, sql, params)
+            async with self._pool.connection() as conn:
+                cur = await conn.execute(sql, params)
+                return await cur.fetchall()
         except Exception as exc:
             raise DatabaseError(f"Monitoring query failed: {exc}") from exc
 

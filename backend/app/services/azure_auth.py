@@ -22,7 +22,7 @@ import asyncio
 import logging
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
     from app.config import Settings
@@ -42,14 +42,21 @@ class BrowserSignInCredential:
     A lock stops concurrent requests from opening several browser windows.
     """
 
-    def __init__(self, *, tenant_id: str | None = None, record_path: Path | None = None) -> None:
-        from azure.identity import InteractiveBrowserCredential, TokenCachePersistenceOptions
+    def __init__(
+        self, *, tenant_id: str | None = None, record_path: Path | None = None
+    ) -> None:
+        from azure.identity import (
+            InteractiveBrowserCredential,
+            TokenCachePersistenceOptions,
+        )
 
         self._record_path = record_path or AUTH_RECORD_PATH
         record = self._load_record(tenant_id)
         self._signed_in = record is not None
         options: dict[str, Any] = {
-            "cache_persistence_options": TokenCachePersistenceOptions(name=TOKEN_CACHE_NAME),
+            "cache_persistence_options": TokenCachePersistenceOptions(
+                name=TOKEN_CACHE_NAME
+            ),
         }
         if record is not None:
             options["authentication_record"] = record
@@ -76,11 +83,17 @@ class BrowserSignInCredential:
         from azure.identity import AuthenticationRecord
 
         try:
-            record = AuthenticationRecord.deserialize(self._record_path.read_text(encoding="utf-8"))
+            record = AuthenticationRecord.deserialize(
+                self._record_path.read_text(encoding="utf-8")
+            )
         except FileNotFoundError:
             return None
-        except Exception as exc:  # corrupt file: sign in again
-            logger.warning("Ignoring unreadable Azure sign-in record %s: %s", self._record_path, exc)
+        except Exception as exc:  # noqa: BLE001 - corrupt file: sign in again
+            logger.warning(
+                "Ignoring unreadable Azure sign-in record %s: %s",
+                self._record_path,
+                exc,
+            )
             return None
         if tenant_id and record.tenant_id.lower() != tenant_id.lower():
             # A different tenant was configured since the last sign-in.
@@ -92,7 +105,11 @@ class BrowserSignInCredential:
             self._record_path.parent.mkdir(parents=True, exist_ok=True)
             self._record_path.write_text(record.serialize(), encoding="utf-8")
         except OSError as exc:  # still signed in for this process
-            logger.warning("Could not save the Azure sign-in record to %s: %s", self._record_path, exc)
+            logger.warning(
+                "Could not save the Azure sign-in record to %s: %s",
+                self._record_path,
+                exc,
+            )
 
 
 class AsyncCredentialAdapter:
@@ -111,10 +128,10 @@ class AsyncCredentialAdapter:
     async def close(self) -> None:
         await asyncio.to_thread(self._credential.close)
 
-    async def __aenter__(self) -> AsyncCredentialAdapter:
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *exc_info: Any) -> None:
+    async def __aexit__(self, *exc_info: object) -> None:
         await self.close()
 
 
@@ -136,7 +153,9 @@ def build_async_credential(settings: Settings) -> Any:
     """Async credential (Foundry voice agent). Call inside the running event loop."""
     method = settings.azure_auth_method
     if method == "browser":
-        return AsyncCredentialAdapter(BrowserSignInCredential(tenant_id=settings.azure_tenant_id))
+        return AsyncCredentialAdapter(
+            BrowserSignInCredential(tenant_id=settings.azure_tenant_id)
+        )
     if method == "client_secret":
         from azure.identity.aio import ClientSecretCredential
 

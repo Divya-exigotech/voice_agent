@@ -20,16 +20,20 @@ Mapping onto the existing tables:
 Status values written to call_tasks.status and calls.status come from settings
 (`StatusValues`) so they can match the owning application's vocabulary.
 
-All methods are blocking; async callers run them in a worker thread.
+All methods are coroutines on a psycopg `AsyncConnectionPool`; nothing blocks the event loop.
+
+On Windows psycopg's async mode needs the selector event loop (run uvicorn with
+`--loop asyncio:SelectorEventLoop`, or with `--reload`, which already uses it).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -48,7 +52,7 @@ from app.schemas.session import (
 from app.services import latency
 
 if TYPE_CHECKING:
-    from psycopg_pool import ConnectionPool
+    from psycopg_pool import AsyncConnectionPool
 
     from app.config import Settings
     from app.services.transcript_storage import BlobTranscriptStorage
@@ -59,6 +63,19 @@ logger = logging.getLogger(__name__)
 SOURCE = "payment_followup_poc"
 AUDIT_ACTOR = "payment-followup-poc"
 OUTCOME_ACTION = "record_outcome"
+
+# call_actions.action_status for the recorded outcome, so the monitoring page
+# shows what happens next instead of the column default ("pending").
+_ACTION_STATUS_BY_OUTCOME: dict[SessionOutcome, str] = {
+    SessionOutcome.PAYMENT_PROMISED: "awaiting_payment",
+    SessionOutcome.REPORTED_PAID: "awaiting_verification",
+    SessionOutcome.CALLBACK_REQUESTED: "callback_pending",
+    SessionOutcome.DISPUTED_INVOICE: "needs_review",
+    SessionOutcome.NEEDS_HUMAN_REVIEW: "needs_review",
+    SessionOutcome.STOP_REQUESTED: "closed",
+    SessionOutcome.COMPLETED_NO_COMMITMENT: "closed",
+    SessionOutcome.TECHNICAL_FAILURE: "failed",
+}
 EVENT_STARTED = "session_started"
 EVENT_ENDED = "session_ended"
 EVENT_INTERRUPTED = "session_interrupted"
@@ -187,7 +204,12 @@ def organization_currency(org_settings: Any, default: str) -> str:
     """organizations.settings->>'currency' when it is an ISO 4217 code, else `default`."""
     if isinstance(org_settings, Mapping):
         value = org_settings.get("currency")
-        if isinstance(value, str) and len(value) == 3 and value.isalpha() and value.isupper():
+        if (
+            isinstance(value, str)
+            and len(value) == 3
+            and value.isalpha()
+            and value.isupper()
+        ):
             return value
     return default
 
@@ -199,17 +221,21 @@ def _as_uuid(value: str, label: str) -> UUID:
         raise DatabaseError(f"{label} {value!r} is not a UUID") from exc
 
 
-def _single_organization_id(pool: ConnectionPool) -> UUID:
+async def _single_organization_id(pool: AsyncConnectionPool) -> UUID:
     """The only organization in the database (startup, when no id is configured)."""
-    with pool.connection() as conn:
-        rows = conn.execute("SELECT id FROM organizations ORDER BY id LIMIT 2").fetchall()
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT id FROM organizations ORDER BY id LIMIT 2")
+        rows = await cur.fetchall()
     if not rows:
         raise DatabaseError("The database has no organizations; cannot choose one")
     if len(rows) > 1:
         raise DatabaseError(
             "The database has several organizations; set DATABASE_ORGANIZATION_ID to choose one"
         )
-    logger.info("DATABASE_ORGANIZATION_ID is not set; using the only organization %s", rows[0]["id"])
+    logger.info(
+        "DATABASE_ORGANIZATION_ID is not set; using the only organization %s",
+        rows[0]["id"],
+    )
     return rows[0]["id"]
 
 
@@ -218,7 +244,7 @@ class PostgresStore:
 
     def __init__(
         self,
-        pool: ConnectionPool,
+        pool: AsyncConnectionPool,
         *,
         organization_id: UUID,
         statuses: StatusValues,
@@ -238,13 +264,20 @@ class PostgresStore:
         self._task_by_customer: dict[str, UUID] = {}
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> PostgresStore:
+    async def from_settings(cls, settings: Settings) -> PostgresStore:
         from psycopg.rows import dict_row
-        from psycopg_pool import ConnectionPool
+        from psycopg_pool import AsyncConnectionPool
 
         if settings.database_url is None:
             raise DatabaseError("DATABASE_URL is required")
-        pool = ConnectionPool(
+        if sys.platform == "win32" and isinstance(
+            asyncio.get_running_loop(), asyncio.ProactorEventLoop
+        ):
+            raise DatabaseError(
+                "psycopg's async mode needs the selector event loop on Windows: start the "
+                "backend with `--loop asyncio:SelectorEventLoop` (or with `--reload`)"
+            )
+        pool = AsyncConnectionPool(
             conninfo=settings.database_url.get_secret_value(),
             min_size=1,
             max_size=4,
@@ -259,14 +292,16 @@ class PostgresStore:
         )
         try:
             # Fail fast at startup if the database is unreachable.
-            pool.open(wait=True, timeout=20)
+            await pool.open(wait=True, timeout=20)
         except Exception as exc:
-            pool.close()
+            await pool.close()
             raise DatabaseError(f"Cannot connect to PostgreSQL: {exc}") from exc
         try:
-            organization_id = settings.database_organization_id or _single_organization_id(pool)
+            organization_id = (
+                settings.database_organization_id or await _single_organization_id(pool)
+            )
         except Exception:
-            pool.close()
+            await pool.close()
             raise
         return cls(
             pool,
@@ -281,18 +316,19 @@ class PostgresStore:
     def organization_id(self) -> UUID:
         return self._org
 
-    def close(self) -> None:
-        self._pool.close()
+    async def close(self) -> None:
+        await self._pool.close()
 
     # --- Queue ------------------------------------------------------------------
 
-    def load_queue(self) -> list[Customer]:
+    async def load_queue(self) -> list[Customer]:
         """Queued call tasks, in scheduled order, as Customer records."""
         s = self._statuses
-        with self._pool.connection() as conn:
-            org = conn.execute(
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
                 "SELECT name, settings FROM organizations WHERE id = %s", (self._org,)
-            ).fetchone()
+            )
+            org = await cur.fetchone()
             if org is None:
                 raise DatabaseError(f"Organization {self._org} does not exist")
             currency = organization_currency(org["settings"], self._default_currency)
@@ -301,8 +337,10 @@ class PostgresStore:
                 "queued": s.task_queued,
                 "open_statuses": list(s.invoice_open),
             }
-            rows = conn.execute(QUEUE_SQL, params).fetchall()
-            queued_clients = conn.execute(QUEUED_CLIENTS_SQL, params).fetchone()["n"]
+            cur = await conn.execute(QUEUE_SQL, params)
+            rows = await cur.fetchall()
+            cur = await conn.execute(QUEUED_CLIENTS_SQL, params)
+            queued_clients = (await cur.fetchone())["n"]
 
         customers: list[Customer] = []
         self._task_by_customer = {}
@@ -317,7 +355,10 @@ class PostgresStore:
             except ValidationError as exc:
                 logger.warning(
                     "Call task %s (client %s, invoice %s) is not loaded; its data is invalid: %s",
-                    row["task_id"], row["client_id"], row["invoice_id"], exc,
+                    row["task_id"],
+                    row["client_id"],
+                    row["invoice_id"],
+                    exc,
                 )
                 continue
             customers.append(customer)
@@ -328,17 +369,22 @@ class PostgresStore:
             logger.warning(
                 "%d client(s) with a queued call task have no open invoice (status in %s) "
                 "and are not in the queue",
-                without_invoice, sorted(s.invoice_open),
+                without_invoice,
+                sorted(s.invoice_open),
             )
         logger.info(
             "Loaded %d queued call task(s) for organization %s (currency %s)",
-            len(customers), self._org, currency,
+            len(customers),
+            self._org,
+            currency,
         )
         return customers
 
     # --- Follow-up calls -------------------------------------------------------------
 
-    def schedule_followup(self, customer_id: str, scheduled_at: datetime) -> UUID | None:
+    async def schedule_followup(
+        self, customer_id: str, scheduled_at: datetime
+    ) -> UUID | None:
         """Queue the client's next call task (saved when the previous call ends).
 
         Returns the new call_tasks.id, or None when the client already has a
@@ -346,8 +392,8 @@ class PostgresStore:
         """
         s = self._statuses
         client_id = _as_uuid(customer_id, "customer_id")
-        with self._pool.connection() as conn:
-            row = conn.execute(
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
                 """
                 INSERT INTO call_tasks (id, organization_id, client_id, scheduled_at, status)
                 SELECT gen_random_uuid(), %(org)s::uuid, %(client)s::uuid,
@@ -370,30 +416,34 @@ class PostgresStore:
                     "queued": s.task_queued,
                     "open_statuses": list(s.invoice_open),
                 },
-            ).fetchone()
+            )
+            row = await cur.fetchone()
             if row is not None:
-                self._audit(
-                    conn, f"call.followup_scheduled client_id={client_id} task_id={row['id']}",
+                await self._audit(
+                    conn,
+                    f"call.followup_scheduled client_id={client_id} task_id={row['id']}",
                     self._clock(),
                 )
         return row["id"] if row is not None else None
 
-    def load_followup(self, customer_id: str) -> Customer | None:
+    async def load_followup(self, customer_id: str) -> Customer | None:
         """The client's queued call task as a Customer, ready to join the queue."""
         s = self._statuses
         client_id = _as_uuid(customer_id, "customer_id")
-        with self._pool.connection() as conn:
-            org = conn.execute(
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
                 "SELECT settings FROM organizations WHERE id = %s", (self._org,)
-            ).fetchone()
-            rows = conn.execute(
+            )
+            org = await cur.fetchone()
+            cur = await conn.execute(
                 QUEUE_SQL,
                 {
                     "org": self._org,
                     "queued": s.task_queued,
                     "open_statuses": list(s.invoice_open),
                 },
-            ).fetchall()
+            )
+            rows = await cur.fetchall()
         if org is None:
             return None
         currency = organization_currency(org["settings"], self._default_currency)
@@ -402,10 +452,15 @@ class PostgresStore:
                 continue
             try:
                 customer = customer_from_row(
-                    row, statuses=s, currency=currency, default_language=self._default_language
+                    row,
+                    statuses=s,
+                    currency=currency,
+                    default_language=self._default_language,
                 )
             except ValidationError as exc:
-                logger.warning("Follow-up task %s is not loaded: %s", row["task_id"], exc)
+                logger.warning(
+                    "Follow-up task %s is not loaded: %s", row["task_id"], exc
+                )
                 return None
             self._task_by_customer[customer.customer_id] = row["task_id"]
             return customer
@@ -413,10 +468,10 @@ class PostgresStore:
 
     # --- Session lifecycle ---------------------------------------------------------
 
-    def session_started(self, record: SessionRecord) -> None:
+    async def session_started(self, record: SessionRecord) -> None:
         started = time.monotonic()
         try:
-            self._session_started(record)
+            await self._session_started(record)
         finally:
             elapsed_ms = (time.monotonic() - started) * 1000
             logger.info("latency db_session_start_ms=%d", elapsed_ms)
@@ -424,7 +479,7 @@ class PostgresStore:
                 latency.DB_SESSION_START, elapsed_ms, session_id=record.session_id
             )
 
-    def _session_started(self, record: SessionRecord) -> None:
+    async def _session_started(self, record: SessionRecord) -> None:
         """Claim the call task and create the calls row (one transaction).
 
         Raises DatabaseError if the task was changed outside this app since the
@@ -433,33 +488,48 @@ class PostgresStore:
         s = self._statuses
         task_id = self._task_by_customer.get(record.customer_id)
         if task_id is None:
-            raise DatabaseError(f"No queued call task is loaded for client {record.customer_id}")
+            raise DatabaseError(
+                f"No queued call task is loaded for client {record.customer_id}"
+            )
         call_id = _as_uuid(record.session_id, "session_id")
-        with self._pool.connection() as conn:
-            claimed = conn.execute(
-                """
-                UPDATE call_tasks SET status = %s, updated_at = %s
-                WHERE id = %s AND organization_id = %s AND status = %s
-                """,
-                (s.task_in_progress, record.started_at, task_id, self._org, s.task_queued),
+        async with self._pool.connection() as conn:
+            claimed = (
+                await conn.execute(
+                    """
+                    UPDATE call_tasks SET status = %s, updated_at = %s
+                    WHERE id = %s AND organization_id = %s AND status = %s
+                    """,
+                    (
+                        s.task_in_progress,
+                        record.started_at,
+                        task_id,
+                        self._org,
+                        s.task_queued,
+                    ),
+                )
             ).rowcount
             if claimed != 1:
                 raise DatabaseError(
                     f"Call task {task_id} is no longer '{s.task_queued}' (changed outside "
                     "this app); restart the backend to reload the queue"
                 )
-            conn.execute(
+            await conn.execute(
                 """
                 INSERT INTO calls (id, organization_id, client_id, agent_id, provider_call_id,
                                    status, duration, created_at, updated_at)
                 VALUES (%s, %s, %s, %s, NULL, %s, NULL, %s, %s)
                 """,
                 (
-                    call_id, self._org, UUID(record.customer_id), self._agent_id,
-                    s.call_in_progress, record.started_at, record.started_at,
+                    call_id,
+                    self._org,
+                    UUID(record.customer_id),
+                    self._agent_id,
+                    s.call_in_progress,
+                    record.started_at,
+                    record.started_at,
                 ),
             )
-            self._insert_event(
+            await self._insert_event(
                 conn,
                 call_id,
                 EVENT_STARTED,
@@ -472,12 +542,18 @@ class PostgresStore:
                 },
                 record.started_at,
             )
-            self._audit(conn, f"call.session_started call_id={call_id} task_id={task_id}", record.started_at)
+            await self._audit(
+                conn,
+                f"call.session_started call_id={call_id} task_id={task_id}",
+                record.started_at,
+            )
 
-    def save_session(self, document: TranscriptDocument, transcript_blob: str | None) -> None:
+    async def save_session(
+        self, document: TranscriptDocument, transcript_blob: str | None
+    ) -> None:
         started = time.monotonic()
         try:
-            self._save_session(document, transcript_blob)
+            await self._save_session(document, transcript_blob)
         finally:
             elapsed_ms = (time.monotonic() - started) * 1000
             logger.info("latency db_final_save_ms=%d", elapsed_ms)
@@ -485,7 +561,9 @@ class PostgresStore:
                 latency.DB_FINAL_SAVE, elapsed_ms, session_id=document.session_id
             )
 
-    def _save_session(self, document: TranscriptDocument, transcript_blob: str | None) -> None:
+    async def _save_session(
+        self, document: TranscriptDocument, transcript_blob: str | None
+    ) -> None:
         """Record the end of a session (one transaction).
 
         Updates calls, replaces the call's transcript turns and outcome action,
@@ -495,46 +573,66 @@ class PostgresStore:
         s = self._statuses
         call_id = _as_uuid(document.session_id, "session_id")
         completed = document.session_status == "completed"
-        duration = max(0, round((document.ended_at - document.started_at).total_seconds()))
-        with self._pool.connection() as conn:
-            self._lock_call(conn, call_id)
-            updated = conn.execute(
-                """
-                UPDATE calls SET status = %s, duration = %s, updated_at = %s
-                WHERE id = %s AND organization_id = %s
-                """,
-                (s.final_call_status(document), duration, document.ended_at, call_id, self._org),
+        duration = max(
+            0, round((document.ended_at - document.started_at).total_seconds())
+        )
+        async with self._pool.connection() as conn:
+            await self._lock_call(conn, call_id)
+            updated = (
+                await conn.execute(
+                    """
+                    UPDATE calls SET status = %s, duration = %s, updated_at = %s
+                    WHERE id = %s AND organization_id = %s
+                    """,
+                    (
+                        s.final_call_status(document),
+                        duration,
+                        document.ended_at,
+                        call_id,
+                        self._org,
+                    ),
+                )
             ).rowcount
             if updated != 1:
                 raise DatabaseError(f"Call {call_id} does not exist")
 
             # Replace rather than append, so a retried save stays idempotent.
-            conn.execute("DELETE FROM call_transcripts WHERE call_id = %s", (call_id,))
+            await conn.execute(
+                "DELETE FROM call_transcripts WHERE call_id = %s", (call_id,)
+            )
             if document.transcript:
-                with conn.cursor() as cur:
-                    cur.executemany(
+                async with conn.cursor() as cur:
+                    await cur.executemany(
                         """
                         INSERT INTO call_transcripts (id, call_id, speaker, "text", "timestamp")
                         VALUES (%s, %s, %s, %s, %s)
                         """,
                         [
-                            (uuid.uuid4(), call_id, turn.speaker, turn.text, turn.timestamp)
+                            (
+                                uuid.uuid4(),
+                                call_id,
+                                turn.speaker,
+                                turn.text,
+                                turn.timestamp,
+                            )
                             for turn in document.transcript
                         ],
                     )
 
-            conn.execute(
+            await conn.execute(
                 "DELETE FROM call_actions WHERE call_id = %s AND action_type = %s",
                 (call_id, OUTCOME_ACTION),
             )
-            # action_status is left to its column default.
-            conn.execute(
+            await conn.execute(
                 """
-                INSERT INTO call_actions (id, call_id, action_type, "result", created_at)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO call_actions (id, call_id, action_type, action_status, "result", created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    uuid.uuid4(), call_id, OUTCOME_ACTION,
+                    uuid.uuid4(),
+                    call_id,
+                    OUTCOME_ACTION,
+                    _ACTION_STATUS_BY_OUTCOME.get(document.outcome, "pending"),
                     _jsonb(
                         {
                             "source": SOURCE,
@@ -547,18 +645,20 @@ class PostgresStore:
                             ),
                             "invoice_id": document.invoice_id,
                             "summary": document.summary,
-                            "review_flags": [f.model_dump() for f in document.review_flags],
+                            "review_flags": [
+                                f.model_dump() for f in document.review_flags
+                            ],
                         }
                     ),
                     document.ended_at,
                 ),
             )
 
-            conn.execute(
+            await conn.execute(
                 "DELETE FROM call_events WHERE call_id = %s AND event_type = %s",
                 (call_id, EVENT_ENDED),
             )
-            self._insert_event(
+            await self._insert_event(
                 conn,
                 call_id,
                 EVENT_ENDED,
@@ -573,7 +673,7 @@ class PostgresStore:
                 document.ended_at,
             )
 
-            conn.execute(
+            await conn.execute(
                 """
                 UPDATE call_tasks SET status = %s, updated_at = %s
                 WHERE organization_id = %s AND status = %s AND id = (
@@ -584,82 +684,98 @@ class PostgresStore:
                 """,
                 (
                     s.task_completed if completed else s.task_queued,
-                    document.ended_at, self._org, s.task_in_progress, call_id, EVENT_STARTED,
+                    document.ended_at,
+                    self._org,
+                    s.task_in_progress,
+                    call_id,
+                    EVENT_STARTED,
                 ),
             )
-            self._audit(
+            await self._audit(
                 conn,
                 f"call.session_ended call_id={call_id} status={document.session_status} "
                 f"outcome={document.outcome.value}",
                 document.ended_at,
             )
 
-    def save_live_transcript(self, session_id: str, turns: Sequence[TranscriptTurn]) -> None:
+    async def save_live_transcript(
+        self, session_id: str, turns: Sequence[TranscriptTurn]
+    ) -> None:
         """Write the turns of a running session so far (replaces; idempotent)."""
         call_id = _as_uuid(session_id, "session_id")
-        with self._pool.connection() as conn:
-            self._lock_call(conn, call_id)
+        async with self._pool.connection() as conn:
+            await self._lock_call(conn, call_id)
             # Only while the call is still in progress; the final save owns it after.
-            running = conn.execute(
+            cur = await conn.execute(
                 "SELECT 1 FROM calls WHERE id = %s AND organization_id = %s AND status = %s",
                 (call_id, self._org, self._statuses.call_in_progress),
-            ).fetchone()
+            )
+            running = await cur.fetchone()
             if running is None:
                 return
-            conn.execute("DELETE FROM call_transcripts WHERE call_id = %s", (call_id,))
+            await conn.execute(
+                "DELETE FROM call_transcripts WHERE call_id = %s", (call_id,)
+            )
             if turns:
-                with conn.cursor() as cur:
-                    cur.executemany(
+                async with conn.cursor() as cur:
+                    await cur.executemany(
                         """
                         INSERT INTO call_transcripts (id, call_id, speaker, "text", "timestamp")
                         VALUES (%s, %s, %s, %s, %s)
                         """,
-                        [(uuid.uuid4(), call_id, t.speaker, t.text, t.timestamp) for t in turns],
+                        [
+                            (uuid.uuid4(), call_id, t.speaker, t.text, t.timestamp)
+                            for t in turns
+                        ],
                     )
-            conn.execute(
-                "UPDATE calls SET updated_at = %s WHERE id = %s", (self._clock(), call_id)
+            await conn.execute(
+                "UPDATE calls SET updated_at = %s WHERE id = %s",
+                (self._clock(), call_id),
             )
 
     @staticmethod
-    def _lock_call(conn: Any, call_id: UUID) -> None:
+    async def _lock_call(conn: Any, call_id: UUID) -> None:
         """Serialise live and final writes for one call until the transaction ends."""
-        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (str(call_id),))
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (str(call_id),)
+        )
 
-    def load_transcript(self, session_id: str) -> TranscriptDocument | None:
+    async def load_transcript(self, session_id: str) -> TranscriptDocument | None:
         """Rebuild a saved session's transcript document; None if not saved."""
         call_id = _as_uuid(session_id, "session_id")
-        with self._pool.connection() as conn:
-            call = conn.execute(
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
                 "SELECT id, client_id, created_at FROM calls WHERE id = %s AND organization_id = %s",
                 (call_id, self._org),
-            ).fetchone()
+            )
+            call = await cur.fetchone()
             if call is None:
                 return None
-            events = {
-                row["event_type"]: row
-                for row in conn.execute(
-                    """
-                    SELECT event_type, event_data, created_at FROM call_events
-                    WHERE call_id = %s AND event_type IN (%s, %s)
-                    """,
-                    (call_id, EVENT_STARTED, EVENT_ENDED),
-                ).fetchall()
-            }
-            action = conn.execute(
+            cur = await conn.execute(
+                """
+                SELECT event_type, event_data, created_at FROM call_events
+                WHERE call_id = %s AND event_type IN (%s, %s)
+                """,
+                (call_id, EVENT_STARTED, EVENT_ENDED),
+            )
+            events = {row["event_type"]: row for row in await cur.fetchall()}
+            cur = await conn.execute(
                 """
                 SELECT "result" FROM call_actions
                 WHERE call_id = %s AND action_type = %s
                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (call_id, OUTCOME_ACTION),
-            ).fetchone()
-            turns = conn.execute(
+            )
+            action = await cur.fetchone()
+            cur = await conn.execute(
                 """
                 SELECT speaker, "text", "timestamp" FROM call_transcripts
                 WHERE call_id = %s ORDER BY "timestamp", id
                 """,
                 (call_id,),
-            ).fetchall()
+            )
+            turns = await cur.fetchall()
 
         ended = events.get(EVENT_ENDED)
         started = events.get(EVENT_STARTED)
@@ -669,7 +785,8 @@ class PostgresStore:
         return TranscriptDocument(
             session_id=str(call["id"]),
             customer_id=str(call["client_id"]),
-            invoice_id=started["event_data"].get("invoice_id") or result.get("invoice_id"),
+            invoice_id=started["event_data"].get("invoice_id")
+            or result.get("invoice_id"),
             started_at=call["created_at"],
             ended_at=ended["created_at"],
             session_status=ended["event_data"]["session_status"],
@@ -677,7 +794,10 @@ class PostgresStore:
             promised_payment_date=result.get("promised_payment_date"),
             transcript=[
                 TranscriptTurn(
-                    turn=number, speaker=row["speaker"], text=row["text"], timestamp=row["timestamp"]
+                    turn=number,
+                    speaker=row["speaker"],
+                    text=row["text"],
+                    timestamp=row["timestamp"],
                 )
                 for number, row in enumerate(turns, start=1)
             ],
@@ -685,7 +805,7 @@ class PostgresStore:
             review_flags=result.get("review_flags") or [],
         )
 
-    def recover_interrupted_sessions(self) -> int:
+    async def recover_interrupted_sessions(self) -> int:
         """Fail sessions this app left in progress (backend stopped mid-session).
 
         Their call tasks go back to queued so the customers are called again.
@@ -695,8 +815,8 @@ class PostgresStore:
         """
         s = self._statuses
         now = self._clock()
-        with self._pool.connection() as conn:
-            stale = conn.execute(
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
                 """
                 SELECT c.id AS call_id, e.event_data->>'call_task_id' AS task_id
                 FROM calls c
@@ -704,20 +824,23 @@ class PostgresStore:
                 WHERE c.organization_id = %s AND c.status = %s AND e.event_data->>'source' = %s
                 """,
                 (EVENT_STARTED, self._org, s.call_in_progress, SOURCE),
-            ).fetchall()
+            )
+            stale = await cur.fetchall()
             for row in stale:
                 call_id = row["call_id"]
-                conn.execute(
+                await conn.execute(
                     "UPDATE calls SET status = %s, updated_at = %s WHERE id = %s",
                     (s.call_failed, now, call_id),
                 )
-                conn.execute(
+                await conn.execute(
                     """
                     INSERT INTO call_actions (id, call_id, action_type, "result", created_at)
                     VALUES (%s, %s, %s, %s, %s)
                     """,
                     (
-                        uuid.uuid4(), call_id, OUTCOME_ACTION,
+                        uuid.uuid4(),
+                        call_id,
+                        OUTCOME_ACTION,
                         _jsonb(
                             {
                                 "source": SOURCE,
@@ -730,16 +853,26 @@ class PostgresStore:
                         now,
                     ),
                 )
-                self._insert_event(conn, call_id, EVENT_INTERRUPTED, {"source": SOURCE}, now)
+                await self._insert_event(
+                    conn, call_id, EVENT_INTERRUPTED, {"source": SOURCE}, now
+                )
                 if row["task_id"]:
-                    conn.execute(
+                    await conn.execute(
                         """
                         UPDATE call_tasks SET status = %s, updated_at = %s
                         WHERE id = %s AND organization_id = %s AND status = %s
                         """,
-                        (s.task_queued, now, UUID(row["task_id"]), self._org, s.task_in_progress),
+                        (
+                            s.task_queued,
+                            now,
+                            UUID(row["task_id"]),
+                            self._org,
+                            s.task_in_progress,
+                        ),
                     )
-                self._audit(conn, f"call.session_interrupted call_id={call_id}", now)
+                await self._audit(
+                    conn, f"call.session_interrupted call_id={call_id}", now
+                )
         if stale:
             logger.warning(
                 "Marked %d interrupted session(s) as failed and re-queued their call tasks",
@@ -749,10 +882,15 @@ class PostgresStore:
 
     # --- Internals -------------------------------------------------------------------
 
-    def _insert_event(
-        self, conn: Any, call_id: UUID, event_type: str, data: dict[str, Any], at: datetime
+    async def _insert_event(
+        self,
+        conn: Any,
+        call_id: UUID,
+        event_type: str,
+        data: dict[str, Any],
+        at: datetime,
     ) -> None:
-        conn.execute(
+        await conn.execute(
             """
             INSERT INTO call_events (id, call_id, event_type, event_data, created_at)
             VALUES (%s, %s, %s, %s, %s)
@@ -760,8 +898,8 @@ class PostgresStore:
             (uuid.uuid4(), call_id, event_type, _jsonb(data), at),
         )
 
-    def _audit(self, conn: Any, action: str, at: datetime) -> None:
-        conn.execute(
+    async def _audit(self, conn: Any, action: str, at: datetime) -> None:
+        await conn.execute(
             """
             INSERT INTO audit_logs (id, organization_id, actor, "action", "timestamp")
             VALUES (%s, %s, %s, %s, %s)
@@ -779,50 +917,52 @@ class PostgresTranscriptStorage:
     write leaves the session open for End Session to be retried.
     """
 
-    def __init__(self, store: PostgresStore, blob: BlobTranscriptStorage | None = None) -> None:
+    def __init__(
+        self, store: PostgresStore, blob: BlobTranscriptStorage | None = None
+    ) -> None:
         self._store = store
         self._blob = blob
         self.kind = "postgres+azure_blob" if blob is not None else "postgres"
 
-    def save(self, document: TranscriptDocument) -> str:
-        blob_name = self._blob.save(document) if self._blob is not None else None
-        self._store.save_session(document, blob_name)
+    async def save(self, document: TranscriptDocument) -> str:
+        blob_name = await self._blob.save(document) if self._blob is not None else None
+        await self._store.save_session(document, blob_name)
         return document.session_id
 
-    def load(self, reference: str) -> TranscriptDocument | None:
-        return self._store.load_transcript(reference)
+    async def load(self, reference: str) -> TranscriptDocument | None:
+        return await self._store.load_transcript(reference)
 
-    def close(self) -> None:
+    async def close(self) -> None:
         # The store is closed by the app, which owns it.
         if self._blob is not None:
-            self._blob.close()
+            await self._blob.close()
 
 
 class LiveTranscriptWriter:
     """Writes a running session's turns to PostgreSQL without blocking the event loop.
 
-    `notify` is cheap and thread-safe. Each call schedules an async flush that
-    runs the blocking write in a worker thread; flushes for one session are
-    serialised and always write the latest turns, so bursts coalesce.
+    `notify` is cheap: it schedules a background flush and returns. Flushes for
+    one session are serialised and always write the latest turns, so bursts
+    coalesce.
     """
 
     def __init__(
-        self, store: PostgresStore, get_turns: Callable[[str], Sequence[TranscriptTurn]]
+        self,
+        store: PostgresStore,
+        get_turns: Callable[[str], Awaitable[Sequence[TranscriptTurn]]],
     ) -> None:
         self._store = store
         self._get_turns = get_turns
-        self._loop: asyncio.AbstractEventLoop | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._pending: set[asyncio.Task[None]] = set()
 
-    def start(self) -> None:
-        self._loop = asyncio.get_running_loop()
+    async def start(self) -> None:
+        """Kept for symmetry with `aclose`; flushes run on the running event loop."""
 
-    def notify(self, session_id: str) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._schedule, session_id)
+    async def notify(self, session_id: str) -> None:
+        await self._schedule(session_id)
 
-    def _schedule(self, session_id: str) -> None:
+    async def _schedule(self, session_id: str) -> None:
         task = asyncio.create_task(self._flush(session_id))
         self._pending.add(task)
         task.add_done_callback(self._pending.discard)
@@ -831,19 +971,23 @@ class LiveTranscriptWriter:
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             try:
-                turns = self._get_turns(session_id)
+                turns = await self._get_turns(session_id)
                 started = time.monotonic()
-                await asyncio.to_thread(self._store.save_live_transcript, session_id, turns)
+                await self._store.save_live_transcript(session_id, turns)
                 elapsed_ms = (time.monotonic() - started) * 1000
                 logger.info(
                     "Live transcript saved for %s (%d turn(s)) latency db_live_write_ms=%d",
-                    session_id, len(turns), elapsed_ms,
+                    session_id,
+                    len(turns),
+                    elapsed_ms,
                 )
                 latency.recorder.record(
                     latency.DB_LIVE_WRITE, elapsed_ms, session_id=session_id
                 )
             except Exception:
-                logger.warning("Live transcript write failed for %s", session_id, exc_info=True)
+                logger.warning(
+                    "Live transcript write failed for %s", session_id, exc_info=True
+                )
 
     async def aclose(self) -> None:
         if self._pending:

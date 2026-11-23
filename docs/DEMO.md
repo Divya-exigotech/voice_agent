@@ -18,7 +18,7 @@ Synthetic data only. No phone call is placed.
 ```powershell
 # terminal 1
 cd backend; .venv\Scripts\Activate.ps1
-uvicorn app.main:create_app --factory --port 8000
+uvicorn app.main:create_app --factory --port 8000 --loop asyncio:SelectorEventLoop
 # terminal 2
 cd frontend; npm run dev
 ```

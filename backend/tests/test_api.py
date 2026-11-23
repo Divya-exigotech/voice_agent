@@ -105,7 +105,10 @@ def test_failed_session_does_not_advance(client: TestClient) -> None:
     res = finalize(client, session["session_id"], session_status="failed")
     assert res.json()["session"]["outcome"] == "technical_failure"
     assert res.json()["advanced"] is False
-    assert client.get("/api/queue").json()["current_customer"]["customer_id"] == SAMPLE_ORDER[0]
+    assert (
+        client.get("/api/queue").json()["current_customer"]["customer_id"]
+        == SAMPLE_ORDER[0]
+    )
 
 
 def test_stale_expected_customer_is_rejected(client: TestClient) -> None:
@@ -123,14 +126,29 @@ def test_finalize_unknown_session(client: TestClient) -> None:
     "body",
     [
         {"session_status": "completed", "promised_payment_date": "2026-11-20"},
-        {"session_status": "completed", "outcome": "payment_promised", "promised_payment_date": "soon"},
+        {
+            "session_status": "completed",
+            "outcome": "payment_promised",
+            "promised_payment_date": "soon",
+        },
         {"session_status": "completed", "outcome": "made_up"},
         {"session_status": "completed", "outcome": "technical_failure"},
         {"session_status": "failed", "outcome": "reported_paid"},
         {"session_status": "active"},
-        {"session_status": "completed", "transcript": [{"speaker": "bot", "text": "x", "timestamp": TS}]},
-        {"session_status": "completed", "transcript": [{"speaker": "user", "text": "", "timestamp": TS}]},
-        {"session_status": "completed", "transcript": [{"speaker": "user", "text": "x", "timestamp": "2026-11-16T10:00:05"}]},
+        {
+            "session_status": "completed",
+            "transcript": [{"speaker": "bot", "text": "x", "timestamp": TS}],
+        },
+        {
+            "session_status": "completed",
+            "transcript": [{"speaker": "user", "text": "", "timestamp": TS}],
+        },
+        {
+            "session_status": "completed",
+            "transcript": [
+                {"speaker": "user", "text": "x", "timestamp": "2026-11-16T10:00:05"}
+            ],
+        },
     ],
     ids=[
         "date-without-promise",
@@ -177,8 +195,9 @@ def test_reset_queue(client: TestClient) -> None:
 def test_invalid_customer_file_fails_startup(tmp_path: Path) -> None:
     bad = tmp_path / "customers.json"
     bad.write_text("[]", encoding="utf-8")
-    with pytest.raises(CustomerDataError):
-        create_app(isolated_settings(customers_json_path=bad), connector=None)
+    app = create_app(isolated_settings(customers_json_path=bad), connector=None)
+    with pytest.raises(CustomerDataError), TestClient(app):
+        pass  # the customer file is loaded (and rejected) during startup
 
 
 # --- M4: transcript storage -------------------------------------------------------
@@ -187,7 +206,9 @@ def test_invalid_customer_file_fails_startup(tmp_path: Path) -> None:
 def test_saved_transcript_can_be_read_back(client: TestClient) -> None:
     session = client.post("/api/sessions").json()
     sid = session["session_id"]
-    assert client.get(f"/api/sessions/{sid}/transcript").status_code == 409  # not saved yet
+    assert (
+        client.get(f"/api/sessions/{sid}/transcript").status_code == 409
+    )  # not saved yet
 
     final = finalize(
         client,
@@ -209,26 +230,37 @@ def test_saved_transcript_can_be_read_back(client: TestClient) -> None:
     assert doc["customer_id"] == SAMPLE_ORDER[0]
     assert doc["outcome"] == "payment_promised"
     assert doc["promised_payment_date"] == "2026-11-20"
-    assert [(t["turn"], t["speaker"]) for t in doc["transcript"]] == [(1, "agent"), (2, "user")]
+    assert [(t["turn"], t["speaker"]) for t in doc["transcript"]] == [
+        (1, "agent"),
+        (2, "user"),
+    ]
 
 
 def test_transcript_of_unknown_session_is_not_found(client: TestClient) -> None:
-    assert client.get("/api/sessions/session_doesnotexist/transcript").status_code == 404
+    assert (
+        client.get("/api/sessions/session_doesnotexist/transcript").status_code == 404
+    )
 
 
-def test_save_failure_keeps_session_open_until_retry_succeeds(customers_file: Path) -> None:
+def test_save_failure_keeps_session_open_until_retry_succeeds(
+    customers_file: Path,
+) -> None:
     from app.services.transcript_storage import InMemoryTranscriptStorage
 
     class FailingTwice(InMemoryTranscriptStorage):
         failures = 2
 
-        def save(self, document):
+        async def save(self, document):
             if self.failures:
                 self.failures -= 1
                 raise ConnectionError("blob endpoint unreachable")
-            return super().save(document)
+            return await super().save(document)
 
-    app = create_app(isolated_settings(customers_json_path=customers_file), storage=FailingTwice(), connector=None)
+    app = create_app(
+        isolated_settings(customers_json_path=customers_file),
+        storage=FailingTwice(),
+        connector=None,
+    )
     with TestClient(app) as client:
         sid = client.post("/api/sessions").json()["session_id"]
         for _ in range(2):
@@ -249,10 +281,14 @@ def test_unreadable_transcript_returns_502(customers_file: Path) -> None:
     from app.services.transcript_storage import InMemoryTranscriptStorage
 
     class LosesBlobs(InMemoryTranscriptStorage):
-        def load(self, reference):
+        async def load(self, reference):
             return None
 
-    app = create_app(isolated_settings(customers_json_path=customers_file), storage=LosesBlobs(), connector=None)
+    app = create_app(
+        isolated_settings(customers_json_path=customers_file),
+        storage=LosesBlobs(),
+        connector=None,
+    )
     with TestClient(app) as client:
         sid = client.post("/api/sessions").json()["session_id"]
         finalize(client, sid)
@@ -261,7 +297,9 @@ def test_unreadable_transcript_returns_502(customers_file: Path) -> None:
         assert "not found in storage" in res.json()["detail"]
 
 
-def test_blob_storage_is_used_when_account_url_is_set(customers_file: Path) -> None:
+async def test_blob_storage_is_used_when_account_url_is_set(
+    customers_file: Path,
+) -> None:
     from app.main import build_transcript_storage
     from app.services.transcript_storage import BlobTranscriptStorage
 
@@ -270,12 +308,14 @@ def test_blob_storage_is_used_when_account_url_is_set(customers_file: Path) -> N
         azure_storage_account_url="https://example.blob.core.windows.net",
         azure_storage_container="call-transcripts",
     )
-    storage = build_transcript_storage(settings)  # constructs clients; no network call
+    storage = await build_transcript_storage(
+        settings
+    )  # constructs clients; no network call
     try:
         assert isinstance(storage, BlobTranscriptStorage)
         assert storage.container_name == "call-transcripts"
     finally:
-        storage.close()
+        await storage.close()
 
 
 def test_health_is_reachable_under_api_prefix(client: TestClient) -> None:

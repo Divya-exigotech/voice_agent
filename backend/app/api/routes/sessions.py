@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException, status
-from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import ConversationServiceDep, FollowUpSchedulerDep, SessionManagerDep
 from app.schemas.session import (
@@ -23,13 +22,13 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 @router.post("", response_model=SessionRecord, status_code=status.HTTP_201_CREATED)
-def create_session(  # sync: database I/O runs in FastAPI's threadpool
+async def create_session(
     manager: SessionManagerDep, body: CreateSessionRequest | None = None
 ) -> SessionRecord:
     """Start a session for the current customer in the queue (no selection)."""
     expected = body.expected_customer_id if body else None
     try:
-        return manager.start_session(expected_customer_id=expected)
+        return await manager.start_session(expected_customer_id=expected)
     except QueueError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except SessionStartError as exc:
@@ -40,8 +39,8 @@ def create_session(  # sync: database I/O runs in FastAPI's threadpool
 
 
 @router.get("", response_model=list[SessionRecord])
-def list_sessions(manager: SessionManagerDep) -> list[SessionRecord]:
-    return manager.list_sessions()
+async def list_sessions(manager: SessionManagerDep) -> list[SessionRecord]:
+    return await manager.list_sessions()
 
 
 @router.post("/{session_id}/transcript", response_model=FinalizeSessionResponse)
@@ -54,13 +53,13 @@ async def finalize_session(
 ) -> FinalizeSessionResponse:
     """Save the transcript to storage, then finalize and advance (idempotent)."""
     try:
-        # Blob upload is blocking I/O: keep it off the event loop (voice relay).
-        result = await run_in_threadpool(manager.finalize_session, session_id, body)
+        result = await manager.finalize_session(session_id, body)
     except SessionNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found") from exc
     except FinalizeInProgressError as exc:
         raise HTTPException(
-            status.HTTP_409_CONFLICT, "The transcript for this session is already being saved"
+            status.HTTP_409_CONFLICT,
+            "The transcript for this session is already being saved",
         ) from exc
     except TranscriptSaveError as exc:
         raise HTTPException(
@@ -71,17 +70,19 @@ async def finalize_session(
         # Session is final: hang up the live voice agent connection.
         await conversation.close(session_id)
     if not result.already_finalized:
-        followups.schedule(result.session)
+        await followups.schedule(result.session)
     return FinalizeSessionResponse(
         session=result.session,
-        queue=manager.queue_state(),
+        queue=await manager.queue_state(),
         advanced=result.advanced,
         already_finalized=result.already_finalized,
     )
 
 
 @router.get("/{session_id}/transcript", response_model=TranscriptDocument)
-def get_transcript(session_id: str, manager: SessionManagerDep) -> TranscriptDocument:
+async def get_transcript(
+    session_id: str, manager: SessionManagerDep
+) -> TranscriptDocument:
     """Read a saved transcript back from storage through the backend.
 
     Only sessions this backend created can be read, by session id; blob names
@@ -89,12 +90,13 @@ def get_transcript(session_id: str, manager: SessionManagerDep) -> TranscriptDoc
     itself stays private.
     """
     try:
-        return manager.load_transcript(session_id)
+        return await manager.load_transcript(session_id)
     except SessionNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found") from exc
     except TranscriptNotSavedError as exc:
         raise HTTPException(
-            status.HTTP_409_CONFLICT, "The session is still active; no transcript saved yet"
+            status.HTTP_409_CONFLICT,
+            "The session is still active; no transcript saved yet",
         ) from exc
     except TranscriptLoadError as exc:
         raise HTTPException(

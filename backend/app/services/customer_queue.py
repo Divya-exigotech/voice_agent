@@ -58,7 +58,9 @@ class CustomerQueue:
     def active_session_id(self) -> str | None:
         return self._active_session_id
 
-    def begin(self, session_id: str, expected_customer_id: str | None = None) -> Customer:
+    def begin(
+        self, session_id: str, expected_customer_id: str | None = None
+    ) -> Customer:
         """Bind a new session to the current customer."""
         if self.is_complete:
             raise QueueExhaustedError("All customers completed")
@@ -67,7 +69,10 @@ class CustomerQueue:
                 f"Session {self._active_session_id} is already active"
             )
         customer = self._customers[self._index]
-        if expected_customer_id is not None and expected_customer_id != customer.customer_id:
+        if (
+            expected_customer_id is not None
+            and expected_customer_id != customer.customer_id
+        ):
             raise StaleCustomerError(
                 f"Current customer is {customer.customer_id}, not {expected_customer_id}"
             )

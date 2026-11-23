@@ -23,13 +23,17 @@ async def send_message(
     except SessionNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found") from exc
     except SessionNotActiveError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Session has already ended") from exc
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Session has already ended"
+        ) from exc
     except (AgentBusyError, ConversationStateError) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except AgentNotConfiguredError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     except AgentError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Voice agent error: {exc}") from exc
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"Voice agent error: {exc}"
+        ) from exc
     return ChatResponse(
         agent_turn=result.agent_turn,
         transcript=list(result.transcript),

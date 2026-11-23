@@ -12,7 +12,7 @@ with `append_audio`. Typed messages keep working during a voice session.
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 MAX_TURN_CHARS = 5000
 
 # Receives agent audio (bytes) and JSON-able UI events (dicts) for one browser.
-VoiceSink = Callable[[Any], None]
+VoiceSink = Callable[[Any], Awaitable[None]]
 
 
 class AgentNotConfiguredError(Exception):
@@ -88,19 +88,25 @@ class ConversationService:
     async def send(self, session_id: str, text: str | None) -> ChatResult:
         """Add the user's message (or request the opening line) and get the agent reply."""
         self._require_connector()
-        snapshot = self._manager.get_conversation(session_id)  # 404 / 409 if not active
+        snapshot = await self._manager.get_conversation(
+            session_id
+        )  # 404 / 409 if not active
         if text is None and snapshot.turns:
-            raise ConversationStateError("The conversation has already started; send a message")
+            raise ConversationStateError(
+                "The conversation has already started; send a message"
+            )
 
         # One in-flight request per session; the event loop makes check+add atomic.
         if session_id in self._busy:
-            raise AgentBusyError("The agent is still responding to the previous message")
+            raise AgentBusyError(
+                "The agent is still responding to the previous message"
+            )
         self._busy.add(session_id)
         try:
             live = await self._ensure_live(session_id, snapshot)
             if text is not None:
                 # Card numbers/codes are removed before storing and before the agent sees them.
-                text = self._record_turn(session_id, "user", text, None)
+                text = await self._record_turn(session_id, "user", text, None)
             try:
                 reply = await live.request_reply(text)
             except AgentError:
@@ -110,7 +116,7 @@ class ConversationService:
             if not reply:
                 raise AgentError("The voice agent returned an empty reply")
 
-            final = self._manager.get_conversation(session_id)
+            final = await self._manager.get_conversation(session_id)
             agent_turn = next(t for t in reversed(final.turns) if t.speaker == "agent")
             return ChatResult(agent_turn, final.turns, final.proposal, final.flags)
         finally:
@@ -124,14 +130,16 @@ class ConversationService:
         A newer browser connection replaces an older one (e.g. after a reload).
         """
         self._require_connector()
-        snapshot = self._manager.get_conversation(session_id)  # 404 / 409 if not active
+        snapshot = await self._manager.get_conversation(
+            session_id
+        )  # 404 / 409 if not active
         await self._ensure_live(session_id, snapshot)
         self._sinks[session_id] = sink
-        sink({"type": "ready", **self._transcript_payload(session_id)})
+        await sink({"type": "ready", **await self._transcript_payload(session_id)})
         if not snapshot.turns and session_id not in self._busy:
             await self._live[session_id].create_response()  # agent speaks first
 
-    def detach_voice(self, session_id: str, sink: VoiceSink) -> None:
+    async def detach_voice(self, session_id: str, sink: VoiceSink) -> None:
         if self._sinks.get(session_id) is sink:
             del self._sinks[session_id]
 
@@ -144,7 +152,7 @@ class ConversationService:
     # --- Lifecycle ------------------------------------------------------------
 
     async def close(self, session_id: str) -> None:
-        self._emit(session_id, {"type": "session_ended"})
+        await self._emit(session_id, {"type": "session_ended"})
         await self._drop(session_id)
 
     async def close_all(self) -> None:
@@ -160,28 +168,35 @@ class ConversationService:
                 "and AZURE_AI_AGENT_NAME)"
             )
 
-    def _emit(self, session_id: str, event: Any) -> None:
+    async def _emit(self, session_id: str, event: Any) -> None:
         sink = self._sinks.get(session_id)
         if sink is not None:
-            sink(event)
+            await sink(event)
 
-    def _transcript_payload(self, session_id: str) -> dict[str, Any]:
-        snapshot = self._manager.get_conversation(session_id)
+    async def _transcript_payload(self, session_id: str) -> dict[str, Any]:
+        snapshot = await self._manager.get_conversation(session_id)
         return {
             "transcript": [t.model_dump(mode="json") for t in snapshot.turns],
-            "proposed_outcome": snapshot.proposal.model_dump(mode="json") if snapshot.proposal else None,
+            "proposed_outcome": snapshot.proposal.model_dump(mode="json")
+            if snapshot.proposal
+            else None,
             "review_flags": [f.model_dump(mode="json") for f in snapshot.flags],
         }
 
-    def _emit_transcript(self, session_id: str) -> None:
+    async def _emit_transcript(self, session_id: str) -> None:
         if session_id not in self._sinks:
             return
         try:
-            self._emit(session_id, {"type": "transcript", **self._transcript_payload(session_id)})
+            await self._emit(
+                session_id,
+                {"type": "transcript", **await self._transcript_payload(session_id)},
+            )
         except SessionNotActiveError:
             pass
 
-    async def _ensure_live(self, session_id: str, snapshot: ConversationSnapshot) -> LiveAgentSession:
+    async def _ensure_live(
+        self, session_id: str, snapshot: ConversationSnapshot
+    ) -> LiveAgentSession:
         live = self._live.get(session_id)
         if live is not None and live.is_open:
             return live
@@ -197,8 +212,12 @@ class ConversationService:
                 organization=self._organization,
                 history=snapshot.turns,
             ),
-            on_turn=lambda speaker, text, at: self._record_turn(session_id, speaker, text, at),
-            on_tool_call=lambda name, args: self._handle_tool_call(session_id, name, args),
+            on_turn=lambda speaker, text, at: self._record_turn(
+                session_id, speaker, text, at
+            ),
+            on_tool_call=lambda name, args: self._handle_tool_call(
+                session_id, name, args
+            ),
             on_event=lambda event: self._emit(session_id, event),
             timeout_seconds=self._timeout,
         )
@@ -217,7 +236,7 @@ class ConversationService:
         if live is not None:
             await live.close()
 
-    def _record_turn(
+    async def _record_turn(
         self, session_id: str, speaker: str, text: str, at: datetime | None
     ) -> str:
         """Screen, store and broadcast a turn. Returns the stored (possibly redacted) text."""
@@ -226,20 +245,20 @@ class ConversationService:
             if speaker == "user":
                 text, flags = redact_user_text(text)
             else:
-                flags = self._screen_agent_text(session_id, text)
-            self._manager.append_turn(session_id, speaker, text, at)  # type: ignore[arg-type]
-            self._manager.add_review_flags(session_id, flags)
+                flags = await self._screen_agent_text(session_id, text)
+            await self._manager.append_turn(session_id, speaker, text, at)  # type: ignore[arg-type]
+            await self._manager.add_review_flags(session_id, flags)
         except SessionNotActiveError:
             logger.info("Ignoring %s turn for ended session %s", speaker, session_id)
             return text
         for flag in flags:
             # Log the kind only; the excerpt may contain customer data.
             logger.warning("Review flag on session %s: %s", session_id, flag.kind)
-        self._emit_transcript(session_id)
+        await self._emit_transcript(session_id)
         return text
 
-    def _screen_agent_text(self, session_id: str, text: str) -> list[ReviewFlag]:
-        snapshot = self._manager.get_conversation(session_id)
+    async def _screen_agent_text(self, session_id: str, text: str) -> list[ReviewFlag]:
+        snapshot = await self._manager.get_conversation(session_id)
         today = self._today()
         user_text = " ".join(t.text for t in snapshot.turns if t.speaker == "user")
         allowed_dates = set(extract_dates(user_text, today))
@@ -253,7 +272,9 @@ class ConversationService:
             allowed_dates=allowed_dates,
         )
 
-    def _handle_tool_call(self, session_id: str, name: str, arguments: str) -> str:
+    async def _handle_tool_call(
+        self, session_id: str, name: str, arguments: str
+    ) -> str:
         if name != RECORD_OUTCOME_TOOL_NAME:
             return json.dumps({"recorded": False, "error": f"Unknown tool {name}"})
         result = validate_outcome_arguments(
@@ -262,8 +283,10 @@ class ConversationService:
         if not result.ok:
             return json.dumps({"recorded": False, "error": result.error})
         try:
-            self._manager.set_proposed_outcome(session_id, result.proposal)
+            await self._manager.set_proposed_outcome(session_id, result.proposal)
         except SessionNotActiveError:
-            return json.dumps({"recorded": False, "error": "The session has already ended"})
-        self._emit_transcript(session_id)
+            return json.dumps(
+                {"recorded": False, "error": "The session has already ended"}
+            )
+        await self._emit_transcript(session_id)
         return json.dumps({"recorded": True})

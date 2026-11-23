@@ -183,6 +183,8 @@ pip install -r requirements-dev.txt
 uvicorn app.main:create_app --factory --reload --port 8000
 ```
 
+On Windows, PostgreSQL's async driver needs the selector event loop: `--reload` already uses it; without `--reload` add `--loop asyncio:SelectorEventLoop`.
+
 API docs are at http://localhost:8000/docs. `GET /health` reports whether the agent is configured.
 Without the agent settings the queue still works, and chat returns 503.
 
