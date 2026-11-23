@@ -5,6 +5,7 @@ Run locally with:
 """
 
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -17,6 +18,7 @@ from fastapi import FastAPI, Request
 
 from app.api.routes import api_router
 from app.config import Settings, get_settings
+from app.services import latency
 from app.services.azure_auth import build_async_credential, build_credential
 from app.services.conversation import ConversationService
 from app.services.customer_repository import load_customers
@@ -26,6 +28,7 @@ from app.services.database import (
     PostgresTranscriptStorage,
 )
 from app.services.followup import FollowUpScheduler
+from app.services.monitoring import MonitoringStore
 from app.services.session_manager import SessionManager
 from app.services.transcript_storage import (
     BlobTranscriptStorage,
@@ -38,6 +41,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 _FROM_SETTINGS = object()
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 
 
 def build_agent_connector(settings: Settings) -> AgentConnector | None:
@@ -139,6 +145,13 @@ def create_app(
         timeout_seconds=settings.azure_ai_agent_timeout_seconds,
     )
 
+    # Read-only async reader for the live monitoring pages (needs the database).
+    monitoring: MonitoringStore | None = (
+        MonitoringStore.from_settings(settings, db.organization_id)
+        if isinstance(db, PostgresStore)
+        else None
+    )
+
     followups = FollowUpScheduler(
         manager, db, delay_seconds=settings.followup_delay_seconds
     )
@@ -147,7 +160,11 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if live_writer is not None:
             live_writer.start()
+        if monitoring is not None:
+            await monitoring.open()
         yield
+        if monitoring is not None:
+            await monitoring.aclose()
         await followups.aclose()
         if live_writer is not None:
             await live_writer.aclose()
@@ -163,17 +180,25 @@ def create_app(
     app.state.session_manager = manager
     app.state.conversation_service = conversation
     app.state.followup_scheduler = followups
+    app.state.monitoring = monitoring
     app.include_router(api_router)
 
     @app.middleware("http")
     async def log_request_latency(request: Request, call_next: Callable[[Request], Any]) -> Any:
         started = time.monotonic()
         response = await call_next(request)
+        elapsed_ms = (time.monotonic() - started) * 1000
         logger.info(
             "latency http_ms=%d %s %s -> %d",
-            (time.monotonic() - started) * 1000,
+            elapsed_ms,
             request.method, request.url.path, response.status_code,
         )
+        # The dashboard's own polling is left out so it does not drown real traffic.
+        if not request.url.path.startswith("/api/monitoring"):
+            path = _UUID_RE.sub("{id}", request.url.path)
+            latency.recorder.record(
+                latency.HTTP, elapsed_ms, label=f"{request.method} {path}"
+            )
         return response
 
     # /api/health is reachable through the Next.js /api proxy for the dashboard.

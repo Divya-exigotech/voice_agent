@@ -1,9 +1,10 @@
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request, status
 
 from app.services.conversation import ConversationService
 from app.services.followup import FollowUpScheduler
+from app.services.monitoring import MonitoringStore
 from app.services.session_manager import SessionManager
 
 
@@ -19,6 +20,17 @@ def get_followup_scheduler(request: Request) -> FollowUpScheduler:
     return request.app.state.followup_scheduler
 
 
+def get_monitoring_store(request: Request) -> MonitoringStore:
+    store = getattr(request.app.state, "monitoring", None)
+    if store is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Live monitoring needs the PostgreSQL database (DATABASE_URL is not set)",
+        )
+    return store
+
+
 FollowUpSchedulerDep = Annotated[FollowUpScheduler, Depends(get_followup_scheduler)]
 SessionManagerDep = Annotated[SessionManager, Depends(get_session_manager)]
 ConversationServiceDep = Annotated[ConversationService, Depends(get_conversation_service)]
+MonitoringStoreDep = Annotated[MonitoringStore, Depends(get_monitoring_store)]
