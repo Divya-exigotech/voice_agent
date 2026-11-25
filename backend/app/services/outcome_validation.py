@@ -74,12 +74,19 @@ def validate_outcome_arguments(
             return _fail("summary must be a string")
         summary = summary.strip()[:MAX_SUMMARY_LENGTH] or None
 
+    end_call = arguments.get("end_call", False)
+    if end_call is None:
+        end_call = False
+    if not isinstance(end_call, bool):
+        return _fail("end_call must be true or false")
+
     return ValidationResult(
         proposal=OutcomeProposal(
             outcome=outcome,
             promised_payment_date=promised,
             summary=summary,
             proposed_at=now,
+            end_call=end_call,
         ),
         error=None,
     )

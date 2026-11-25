@@ -102,3 +102,23 @@ def test_rejects_invalid(args, message) -> None:
 def test_summary_is_truncated() -> None:
     result = validate({"outcome": "reported_paid", "summary": "x" * 900})
     assert len(result.proposal.summary) == 500
+
+
+def test_end_call_defaults_to_false() -> None:
+    result = validate({"outcome": "callback_requested"})
+    assert result.ok and result.proposal.end_call is False
+
+
+@pytest.mark.parametrize(
+    "value, expected", [(True, True), (False, False), (None, False)]
+)
+def test_end_call_is_accepted(value, expected) -> None:
+    result = validate({"outcome": "completed_no_commitment", "end_call": value})
+    assert result.ok and result.proposal.end_call is expected
+
+
+@pytest.mark.parametrize("value", ["true", 1, "yes"])
+def test_end_call_must_be_boolean(value) -> None:
+    result = validate({"outcome": "callback_requested", "end_call": value})
+    assert not result.ok
+    assert "end_call must be true or false" in result.error

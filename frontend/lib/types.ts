@@ -131,6 +131,8 @@ export interface OutcomeProposal {
   promised_payment_date: string | null;
   summary: string | null;
   proposed_at: string;
+  // The agent is saying goodbye: the call may end by itself.
+  end_call?: boolean;
 }
 
 export interface ChatResponse {

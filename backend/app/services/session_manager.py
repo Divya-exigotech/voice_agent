@@ -339,11 +339,17 @@ class SessionManager:
             review_flags=list(self._flags.get(session_id, ())),
         )
 
-    async def requeue_customer(self, customer: Customer) -> None:
-        """Add a customer to the end of the queue (follow-up call, after everyone else)."""
+    async def requeue_customer(self, customer: Customer) -> bool:
+        """Add a customer to the end of the queue (follow-up call, after everyone else).
+
+        Returns False, and changes nothing, when the customer is already waiting.
+        """
         async with self._lock:
+            if self._queue.is_pending(customer.customer_id):
+                return False
             self._customers_by_id[customer.customer_id] = customer
             self._queue.append(customer)
+            return True
 
     async def customer(self, customer_id: str) -> Customer | None:
         async with self._lock:

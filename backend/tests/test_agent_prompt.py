@@ -80,6 +80,46 @@ def test_opening_vs_reconnect(sample_customers) -> None:
     assert "speak first" not in later
 
 
+def test_opening_confirms_identity_before_invoice_details(sample_customers) -> None:
+    customer = sample_customers[0]
+    text = build_session_context(customer=customer, today=TODAY, organization="X")
+    stage = text.split("## Start of conversation")[1]
+    assert f"speaking with {customer.customer_name}" in stage
+    assert "Do not mention the invoice" in stage
+    # The success path is unchanged once identity is confirmed.
+    assert "invoice number, amount due and due date" in stage
+    assert "already paid or when they expect to pay" in stage
+    assert "share nothing about the invoice" in text
+
+
+def test_reconnect_does_not_reverify_identity(sample_customers) -> None:
+    history = [TranscriptTurn(speaker="agent", text="Hello.", timestamp=TS)]
+    text = build_session_context(
+        customer=sample_customers[0], today=TODAY, organization="X", history=history
+    )
+    assert "do not ask again" in text
+
+
+def test_context_covers_human_like_situations(sample_customers) -> None:
+    text = build_session_context(
+        customer=sample_customers[0], today=TODAY, organization="X"
+    )
+    for phrase in [
+        "call me later",  # busy customer -> ask for a callback time
+        "what time is good to call back",
+        "1 minute of hold has passed",  # hold handling
+        "up to 3 requests in total",  # silence escalation
+        "no response from customer",
+        "someone else answers",  # third party
+        "prefer to speak with",
+        "wrong number",
+        "Never ask for date of birth",
+    ]:
+        assert phrase in text, phrase
+    # Callback time has no tool field, so it travels in the summary.
+    assert "callback_requested with that time written in the summary" in text
+
+
 def test_amount_formatting(sample_customers) -> None:
     text = build_session_context(
         customer=sample_customers[0], today=TODAY, organization="X"
