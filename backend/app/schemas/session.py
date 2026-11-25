@@ -161,6 +161,8 @@ class OutcomeProposal(BaseModel):
     promised_payment_date: date | None = None
     summary: str | None = None
     proposed_at: datetime
+    # The agent is saying goodbye: the conversation is over and the call may end.
+    end_call: bool = False
 
 
 class ChatRequest(BaseModel):

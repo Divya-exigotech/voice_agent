@@ -129,8 +129,9 @@ export function Dashboard() {
 
   const outcomeRecorded =
     !!proposal &&
-    AUTO_OUTCOMES.includes(proposal.outcome) &&
-    (proposal.outcome !== "payment_promised" || !!proposal.promised_payment_date);
+    (proposal.end_call === true ||
+      (AUTO_OUTCOMES.includes(proposal.outcome) &&
+        (proposal.outcome !== "payment_promised" || !!proposal.promised_payment_date)));
 
   useEffect(() => {
     endHandler.current = handleEnd;
@@ -341,7 +342,12 @@ export function Dashboard() {
       setSaveFailed(false);
       setStatus(sessionStatus === "failed" ? "failed" : "completed");
       const outcome = result.session.outcome;
-      if (wasVoice && sessionStatus === "completed" && outcome && AUTO_OUTCOMES.includes(outcome)) {
+      if (
+        wasVoice &&
+        sessionStatus === "completed" &&
+        outcome &&
+        (AUTO_OUTCOMES.includes(outcome) || outcomeRecorded)
+      ) {
         setAutoNext(true); // start the next customer's call by itself
         if (outcome === "payment_promised") setFollowUpsPending(true); // called again last
       }

@@ -123,7 +123,9 @@ class StatusValues:
 
 # The earliest queued task per client (so customer_id stays unique in the
 # queue), with that client's open invoice that is due first. Tasks for clients
-# without an open invoice are not loaded. Final order: scheduled_at.
+# without an open invoice are not loaded, and neither are tasks scheduled for
+# later (a promised payment date): those join the queue once they are due.
+# Final order: scheduled_at.
 QUEUE_SQL = """
 SELECT q.* FROM (
     SELECT DISTINCT ON (t.client_id)
@@ -153,6 +155,7 @@ SELECT q.* FROM (
         LIMIT 1
     ) i ON TRUE
     WHERE t.organization_id = %(org)s AND t.status = %(queued)s
+      AND t.scheduled_at <= now()
     ORDER BY t.client_id, t.scheduled_at, t.created_at, t.id
 ) q
 ORDER BY q.scheduled_at, q.task_created_at, q.task_id
@@ -161,7 +164,7 @@ ORDER BY q.scheduled_at, q.task_created_at, q.task_id
 QUEUED_CLIENTS_SQL = """
 SELECT count(DISTINCT client_id) AS n
 FROM call_tasks
-WHERE organization_id = %(org)s AND status = %(queued)s
+WHERE organization_id = %(org)s AND status = %(queued)s AND scheduled_at <= now()
 """
 
 
@@ -425,6 +428,52 @@ class PostgresStore:
                     self._clock(),
                 )
         return row["id"] if row is not None else None
+
+    async def load_due_queue(self) -> list[Customer]:
+        """Queued call tasks that became due and were not loaded yet.
+
+        Scheduled calls (a promised payment date) stay out of the queue until
+        their time comes; the follow-up scheduler calls this regularly and adds
+        what it returns to the end of the queue. A task already loaded (at
+        startup or by an earlier check) is not returned again.
+        """
+        s = self._statuses
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT settings FROM organizations WHERE id = %s", (self._org,)
+            )
+            org = await cur.fetchone()
+            cur = await conn.execute(
+                QUEUE_SQL,
+                {
+                    "org": self._org,
+                    "queued": s.task_queued,
+                    "open_statuses": list(s.invoice_open),
+                },
+            )
+            rows = await cur.fetchall()
+        if org is None:
+            return []
+        currency = organization_currency(org["settings"], self._default_currency)
+        due: list[Customer] = []
+        for row in rows:
+            try:
+                customer = customer_from_row(
+                    row,
+                    statuses=s,
+                    currency=currency,
+                    default_language=self._default_language,
+                )
+            except ValidationError as exc:
+                logger.warning(
+                    "Due call task %s is not loaded: %s", row["task_id"], exc
+                )
+                continue
+            if self._task_by_customer.get(customer.customer_id) == row["task_id"]:
+                continue  # already in the queue (or already worked on)
+            self._task_by_customer[customer.customer_id] = row["task_id"]
+            due.append(customer)
+        return due
 
     async def load_followup(self, customer_id: str) -> Customer | None:
         """The client's queued call task as a Customer, ready to join the queue."""

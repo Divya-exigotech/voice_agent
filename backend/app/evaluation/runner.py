@@ -78,7 +78,9 @@ def evaluate_document(
     flags = document.review_flags
 
     # Opening grounded on the record (advisory: spoken numbers may be words).
-    opening = _normalize(agent_turns[0]) if agent_turns else ""
+    # The first turn only confirms who is on the line, so the invoice may come
+    # in the second agent turn.
+    opening = _normalize(" ".join(agent_turns[:2]))
     invoice = customer.invoice
     amount_digits = _normalize(f"{invoice.amount_due:.2f}".removesuffix(".00"))
     mentions = _normalize(invoice.invoice_number) in opening or amount_digits in opening

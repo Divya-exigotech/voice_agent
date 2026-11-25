@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # Seconds between a call that ended with a payment promise and the customer's
     # next call becoming ready in the queue (0 turns follow-up calls off).
     followup_delay_seconds: int = Field(default=180, ge=0)
+    # A call that ends with a promised payment *date* is followed up on that date
+    # (or, for a promise to pay today, the next business day) at this hour in
+    # `business_timezone`. Weekends are skipped: calls are made Monday to Friday.
+    followup_call_hour: int = Field(default=10, ge=0, le=23)
+    # Seconds between checks for scheduled calls that have become due.
+    followup_poll_seconds: int = Field(default=60, ge=1)
 
     # --- Existing PostgreSQL database ------------------------------------------
     # When set, the database replaces customers.json: the queue is read from

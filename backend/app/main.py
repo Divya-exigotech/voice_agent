@@ -167,7 +167,12 @@ def create_app(
         )
 
         followups = FollowUpScheduler(
-            manager, db, delay_seconds=settings.followup_delay_seconds
+            manager,
+            db,
+            delay_seconds=settings.followup_delay_seconds,
+            business_timezone=business_tz,
+            call_hour=settings.followup_call_hour,
+            poll_seconds=settings.followup_poll_seconds,
         )
 
         app.state.session_manager = manager
@@ -178,6 +183,7 @@ def create_app(
 
         if live_writer is not None:
             await live_writer.start()
+        await followups.start()
         if monitoring is not None:
             await monitoring.open()
         yield

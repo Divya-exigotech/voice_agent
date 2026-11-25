@@ -97,6 +97,13 @@ class CustomerQueue:
         """Add ``customer`` at the end of the queue (called after everyone else)."""
         self._customers = (*self._customers, customer)
 
+    def is_pending(self, customer_id: str) -> bool:
+        """True when ``customer_id`` is the current customer or still waiting."""
+        return any(
+            customer.customer_id == customer_id
+            for customer in self._customers[self._index :]
+        )
+
     def reset(self) -> None:
         if self._active_session_id is not None:
             raise SessionAlreadyActiveError("Cannot reset while a session is active")
