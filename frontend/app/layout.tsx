@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Payment Follow-up Agent PoC",
-  description: "Browser-based Azure AI Foundry payment follow-up voice agent demo",
+  title: "Payment Follow-up Agent",
+  description: "Secure access to the Payment Follow-up Agent workspace.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

@@ -7,11 +7,6 @@ const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8000";
 const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
-  // Done here rather than in app/page.tsx: a redirect() thrown while rendering
-  // breaks Cache Components prerender validation for the "/" route.
-  async redirects() {
-    return [{ source: "/", destination: "/dashboard", permanent: false }];
-  },
   async rewrites() {
     return [{ source: "/api/:path*", destination: `${backendUrl}/api/:path*` }];
   },
