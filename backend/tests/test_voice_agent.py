@@ -638,3 +638,184 @@ def test_repeatedly_empty_responses_fail_with_reason(monkeypatch) -> None:
         AgentError, match="empty reply \\(response cancelled: turn_detected\\)"
     ):
         asyncio.run(scenario())
+
+
+# --- Silence/hold notes and barge-in truncation ----------------------------------
+
+
+def _voice_session(connector: FakeConnector, **kwargs) -> LiveAgentSession:
+    async def on_turn(*_args) -> None:
+        return None
+
+    return LiveAgentSession(
+        connector.connect,
+        context="CONTEXT",
+        on_turn=on_turn,
+        on_tool_call=recorded,
+        timeout_seconds=1.0,
+        **kwargs,
+    )
+
+
+def _system_notes(conn) -> list[str]:
+    return [
+        item["content"][0]["text"]
+        for item in conn.items("message")[1:]  # [0] is the session context
+        if item["role"] == "system"
+    ]
+
+
+def _audio_delta(item_id: str, size: int) -> dict:
+    return {
+        "type": "response.output_audio.delta",
+        "item_id": item_id,
+        "delta": base64.b64encode(b"\x00" * size).decode(),
+    }
+
+
+def test_silence_notes_after_agent_reply_stop_after_the_limit() -> None:
+    from app.services.voice_agent import MAX_SILENCE_PROMPTS, SILENCE_NOTE
+
+    async def scenario():
+        connector = FakeConnector()
+        session = _voice_session(connector, silence_seconds=0.02)
+        await session.start()
+        session.set_idle_prompts(True)
+        await session.create_response()  # opening line
+        await asyncio.sleep(0.4)
+        await session.close()
+        return connector.connections[0]
+
+    conn = asyncio.run(scenario())
+    assert _system_notes(conn) == [SILENCE_NOTE] * MAX_SILENCE_PROMPTS
+    assert conn.creates == 1 + MAX_SILENCE_PROMPTS
+
+
+def test_no_silence_notes_unless_enabled() -> None:
+    async def scenario():
+        connector = FakeConnector()
+        session = _voice_session(connector, silence_seconds=0.02)
+        await session.start()
+        await session.create_response()
+        await asyncio.sleep(0.15)
+        await session.close()
+        return connector.connections[0]
+
+    conn = asyncio.run(scenario())
+    assert _system_notes(conn) == []
+    assert conn.creates == 1
+
+
+def test_customer_speech_cancels_the_silence_countdown() -> None:
+    async def scenario():
+        connector = FakeConnector()
+        connector.audio_script = [[{"type": "input_audio_buffer.speech_started"}]]
+        session = _voice_session(connector, silence_seconds=0.15)
+        await session.start()
+        session.set_idle_prompts(True)
+        await session.create_response()
+        await asyncio.sleep(0.05)
+        await session.append_audio(b"\x00\x00")  # customer starts talking
+        await asyncio.sleep(0.3)
+        await session.close()
+        return connector.connections[0]
+
+    conn = asyncio.run(scenario())
+    assert _system_notes(conn) == []
+
+
+def test_hold_request_waits_for_the_hold_note() -> None:
+    from app.services.voice_agent import HOLD_NOTE, SILENCE_NOTE
+
+    async def scenario():
+        connector = FakeConnector()
+        connector.audio_script = [
+            [
+                *user_speaks("Can you hold on, give me two minutes"),
+                *agent_says("Sure, take your time, I'll be here."),
+            ]
+        ]
+        session = _voice_session(connector, silence_seconds=0.03, hold_seconds=0.25)
+        await session.start()
+        session.set_idle_prompts(True)
+        await session.append_audio(b"\x00\x00")
+        await asyncio.sleep(0.12)
+        early = list(_system_notes(connector.connections[0]))
+        await asyncio.sleep(0.3)
+        await session.close()
+        return early, connector.connections[0]
+
+    early, conn = asyncio.run(scenario())
+    assert early == []  # no "are you there?" while the customer is on hold
+    notes = _system_notes(conn)
+    assert notes[0] == HOLD_NOTE
+    assert set(notes[1:]) <= {SILENCE_NOTE}
+
+
+def test_barge_in_truncates_the_unheard_agent_audio() -> None:
+    async def scenario():
+        connector = FakeConnector()
+        connector.audio_script = [
+            [_audio_delta("item_agent_1", 48_000)],  # 1 s of agent audio
+            [{"type": "input_audio_buffer.speech_started"}],
+        ]
+        session = _voice_session(connector)
+        await session.start()
+        await session.append_audio(b"\x00\x00")
+        await asyncio.sleep(0.2)
+        await session.append_audio(b"\x00\x00")  # customer interrupts
+        await asyncio.sleep(0.05)
+        await session.close()
+        return connector.connections[0]
+
+    conn = asyncio.run(scenario())
+    truncates = [e for e in conn.sent if e["type"] == "conversation.item.truncate"]
+    assert len(truncates) == 1
+    assert truncates[0]["item_id"] == "item_agent_1"
+    assert truncates[0]["content_index"] == 0
+    assert 100 <= truncates[0]["audio_end_ms"] < 1000
+
+
+def test_no_truncation_when_the_agent_audio_was_fully_played() -> None:
+    async def scenario():
+        connector = FakeConnector()
+        connector.audio_script = [
+            [_audio_delta("item_agent_1", 480)],  # 10 ms of agent audio
+            [{"type": "input_audio_buffer.speech_started"}],
+        ]
+        session = _voice_session(connector)
+        await session.start()
+        await session.append_audio(b"\x00\x00")
+        await asyncio.sleep(0.1)
+        await session.append_audio(b"\x00\x00")
+        await asyncio.sleep(0.05)
+        await session.close()
+        return connector.connections[0]
+
+    conn = asyncio.run(scenario())
+    assert not [e for e in conn.sent if e["type"] == "conversation.item.truncate"]
+
+
+def test_truncate_error_does_not_fail_a_typed_reply() -> None:
+    async def scenario():
+        connector = FakeConnector(
+            [
+                [
+                    {
+                        "type": "error",
+                        "error": {
+                            "message": "audio_end_ms is too large",
+                            "event_id": "truncate_1",
+                        },
+                    },
+                    *agent_says("Hello."),
+                ]
+            ]
+        )
+        session = _voice_session(connector)
+        await session.start()
+        reply = await session.request_reply(None)
+        await session.close()
+        return reply
+
+    assert asyncio.run(scenario()) == "Hello."

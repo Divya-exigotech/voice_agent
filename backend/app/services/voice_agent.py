@@ -22,6 +22,7 @@ import base64
 import contextlib
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
@@ -29,7 +30,12 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from app.services import latency
-from app.services.agent_prompt import RECORD_OUTCOME_TOOL, RECORD_OUTCOME_TOOL_NAME
+from app.services.agent_prompt import (
+    HOLD_NOTE,
+    RECORD_OUTCOME_TOOL,
+    RECORD_OUTCOME_TOOL_NAME,
+    SILENCE_NOTE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +51,29 @@ MAX_TOOL_ROUNDS = 3
 # asked again this many times, after this long without a new response.
 MAX_EMPTY_RETRIES = 2
 EMPTY_REPLY_RETRY_SECONDS = 2.0
+
+# Agent audio is PCM16 mono at 24 kHz: 2 bytes per sample.
+PCM16_BYTES_PER_SECOND = 48_000
+
+# Silence and hold notes (voice only). The session context tells the agent to
+# react to exactly these messages, because the model has no clock of its own.
+SILENCE_PROMPT_SECONDS = 5.0
+HOLD_PROMPT_SECONDS = 60.0
+# The agent asks up to 3 times, then says goodbye on the 4th note.
+MAX_SILENCE_PROMPTS = 4
+
+# The customer asked the agent to wait ("hold on", "give me two minutes", ...).
+HOLD_REQUEST = re.compile(
+    r"\b(?:hold on|hold the line|(?:please|can you|could you) hold"
+    r"|(?:one|a|just a|wait a) (?:sec|second|moment|min|minute)s?\b"
+    r"|give me (?:a|one|two|three|five|\d+|a few|few|some) (?:sec|second|moment|min|minute)s?\b"
+    r"|(?:two|three|five|\d+|a few|few) (?:min|minute)s?\b"
+    r"|be right back|wait (?:for )?(?:a|one) (?:sec|second|moment|min|minute))",
+    re.IGNORECASE,
+)
+
+# Client event ids for truncation, so its (harmless) errors can be recognised.
+TRUNCATE_EVENT_PREFIX = "truncate_"
 
 AGENT_TRANSCRIPT_DELTA_EVENTS = (
     "response.output_audio_transcript.delta",
@@ -117,6 +146,8 @@ class LiveAgentSession:
         on_tool_call: ToolHandler,
         on_event: EventListener | None = None,
         timeout_seconds: float = 45.0,
+        silence_seconds: float = SILENCE_PROMPT_SECONDS,
+        hold_seconds: float = HOLD_PROMPT_SECONDS,
     ) -> None:
         self._connect = connect
         self._context = context
@@ -155,6 +186,21 @@ class LiveAgentSession:
         self._pending_user_text = False
         self._empty_retries = 0
         self._retry_task: asyncio.Task[None] | None = None
+
+        # Silence/hold notes: only while a browser voice call is attached.
+        self._silence_seconds = silence_seconds
+        self._hold_seconds = hold_seconds
+        self._idle_prompts = False
+        self._idle_task: asyncio.Task[None] | None = None
+        self._silence_prompts = 0
+        self._on_hold = False
+
+        # The agent audio item being played in the browser, to estimate how much
+        # the customer heard (barge-in truncation) and when playback ends.
+        self._audio_item_id: str | None = None
+        self._audio_started_at: float | None = None  # monotonic playback start
+        self._audio_bytes = 0
+        self._truncations = 0
 
         self.session_info: dict[str, Any] = {}
         self.conversation_id: str | None = None
@@ -230,6 +276,7 @@ class LiveAgentSession:
         self._closed = True
         if self._retry_task is not None and not self._retry_task.done():
             self._retry_task.cancel()
+        self._cancel_idle_prompt()
         if self._pump_task is not None and not self._pump_task.done():
             self._pump_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -376,12 +423,15 @@ class LiveAgentSession:
                 latency.recorder.record(latency.VOICE_REPLY, reply_ms)
                 self._speech_stopped_at = None
             try:
-                await self._emit(audio_bytes(event_value(event, "delta")))
+                chunk = audio_bytes(event_value(event, "delta"))
             except (
                 AgentError,
                 ValueError,
             ) as exc:  # skip one bad chunk, keep the call alive
                 logger.warning("Dropping agent audio chunk: %s", exc)
+                return
+            self._track_agent_audio(event_value(event, "item_id"), len(chunk))
+            await self._emit(chunk)
         elif kind in AGENT_TRANSCRIPT_DELTA_EVENTS:
             delta = event_value(event, "delta")
             if isinstance(delta, str):
@@ -394,12 +444,18 @@ class LiveAgentSession:
             if text and (not self._response_text or self._response_text[-1] != text):
                 self._response_text.append(text)
         elif kind == "input_audio_buffer.speech_started":
-            # Barge-in: the browser drops queued agent audio.
+            # Barge-in: the browser drops queued agent audio, so the agent must
+            # also forget the part the customer never heard.
             self._speech_stopped_at = None
+            self._cancel_idle_prompt()
             await self._emit({"type": "speech_started"})
+            await self._truncate_unheard_audio()
         elif kind == "input_audio_buffer.speech_stopped":
             self._speech_stopped_at = time.monotonic()
             await self._emit({"type": "speech_stopped"})
+            # Normally a response starts at once and cancels this; if the speech
+            # was only noise and nothing starts, silence is still noticed.
+            self._arm_idle_prompt()
         elif kind == "input_audio_buffer.committed":
             item_id = event_value(event, "item_id")
             if item_id:
@@ -408,6 +464,8 @@ class LiveAgentSession:
             text = (event_value(event, "transcript") or "").strip()
             at = self._speech_committed_at.pop(str(event_value(event, "item_id")), None)
             if text:
+                self._silence_prompts = 0  # the customer spoke: restart the count
+                self._on_hold = bool(HOLD_REQUEST.search(text))
                 await self._on_turn("user", text, at)
         elif kind == "conversation.item.input_audio_transcription.failed":
             self._speech_committed_at.pop(str(event_value(event, "item_id")), None)
@@ -417,6 +475,10 @@ class LiveAgentSession:
         elif kind == "error":
             error = event_value(event, "error")
             message = event_value(error, "message") or "Voice agent error"
+            if self._is_truncate_error(error, message):
+                # Truncation is best effort (e.g. the audio had already ended).
+                logger.info("Could not truncate interrupted agent audio: %s", message)
+                return
             if self._is_active_response_error(error, message):
                 # The agent was already responding (e.g. its own greeting). That
                 # response answers an opening request; a typed message is asked
@@ -432,6 +494,7 @@ class LiveAgentSession:
         elif kind == "response.created":
             self._responses_started += 1
             self._idle.clear()
+            self._cancel_idle_prompt()
         elif kind == "response.done":
             self._idle.set()
             await self._on_response_done(event_value(event, "response"))
@@ -486,6 +549,7 @@ class LiveAgentSession:
         )
         if reply:
             self._last_reply = reply
+        self._arm_idle_prompt()
         await self._emit({"type": "response_done"})
         if self._pending is None or self._pending.done():
             return
@@ -568,6 +632,120 @@ class LiveAgentSession:
                 if text:
                     texts.append(str(text).strip())
         return texts
+
+    # --- Silence and hold notes ---------------------------------------------------
+
+    def set_idle_prompts(self, enabled: bool) -> None:
+        """Turn the silence/hold notes on (browser voice attached) or off."""
+        self._idle_prompts = enabled
+        if not enabled:
+            self._cancel_idle_prompt()
+
+    def _cancel_idle_prompt(self) -> None:
+        task, self._idle_task = self._idle_task, None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _playback_remaining(self) -> float:
+        """Seconds of agent audio the browser still has to play (estimate)."""
+        if self._audio_started_at is None:
+            return 0.0
+        end = self._audio_started_at + self._audio_bytes / PCM16_BYTES_PER_SECOND
+        return max(0.0, end - time.monotonic())
+
+    def _arm_idle_prompt(self) -> None:
+        """Start the silence (or hold) countdown from the end of the agent's audio."""
+        self._cancel_idle_prompt()
+        if not self._idle_prompts or self._closed:
+            return
+        if not self._on_hold and self._silence_prompts >= MAX_SILENCE_PROMPTS:
+            return  # the agent has already said goodbye for lack of a reply
+        wait = self._hold_seconds if self._on_hold else self._silence_seconds
+        delay = self._playback_remaining() + wait
+        self._idle_task = asyncio.create_task(
+            self._idle_prompt_after(delay), name="voice-agent-idle-prompt"
+        )
+
+    async def _idle_prompt_after(self, delay: float) -> None:
+        await asyncio.sleep(delay)
+        self._idle_task = None  # don't let the reply's response.done cancel us
+        if (
+            not self._idle_prompts
+            or not self.is_open
+            or not self._idle.is_set()
+            or self._pending is not None
+        ):
+            return
+        if self._on_hold:
+            note, self._on_hold = HOLD_NOTE, False
+        else:
+            note = SILENCE_NOTE
+            self._silence_prompts += 1
+        logger.info("Telling the voice agent: %s", note)
+        try:
+            await self._send(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": note}],
+                    },
+                }
+            )
+            await self._conn.response.create()
+        except Exception:
+            logger.warning("Could not send the %s note", note, exc_info=True)
+
+    # --- Barge-in truncation -----------------------------------------------------
+
+    def _track_agent_audio(self, item_id: Any, size: int) -> None:
+        item_id = str(item_id) if item_id else None
+        if item_id != self._audio_item_id or self._audio_started_at is None:
+            # A new item plays after whatever the browser has still queued.
+            now = time.monotonic()
+            self._audio_started_at = now + self._playback_remaining()
+            self._audio_item_id = item_id
+            self._audio_bytes = 0
+        self._audio_bytes += size
+
+    async def _truncate_unheard_audio(self) -> None:
+        """Cut the interrupted agent item to what the customer actually heard.
+
+        The browser stops playback at barge-in, but the service keeps the whole
+        generated reply in the conversation; without this the agent would assume
+        the customer heard sentences that were never played.
+        """
+        item_id, started = self._audio_item_id, self._audio_started_at
+        generated_ms = self._audio_bytes * 1000 / PCM16_BYTES_PER_SECOND
+        self._audio_item_id = self._audio_started_at = None
+        self._audio_bytes = 0
+        if item_id is None or started is None:
+            return
+        heard_ms = max(0, int((time.monotonic() - started) * 1000))
+        if heard_ms >= generated_ms:
+            return  # everything was already played
+        self._truncations += 1
+        logger.info(
+            "Barge-in: truncating agent audio at %d of %d ms", heard_ms, generated_ms
+        )
+        with contextlib.suppress(AgentError):
+            await self._send(
+                {
+                    "type": "conversation.item.truncate",
+                    "event_id": f"{TRUNCATE_EVENT_PREFIX}{self._truncations}",
+                    "item_id": item_id,
+                    "content_index": 0,
+                    "audio_end_ms": heard_ms,
+                }
+            )
+
+    @staticmethod
+    def _is_truncate_error(error: Any, message: str) -> bool:
+        event_id = str(event_value(error, "event_id") or "")
+        return (
+            event_id.startswith(TRUNCATE_EVENT_PREFIX) or "truncat" in message.lower()
+        )
 
     @staticmethod
     def _is_active_response_error(error: Any, message: str) -> bool:
