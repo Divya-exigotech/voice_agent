@@ -43,8 +43,13 @@ class Settings(BaseSettings):
     azure_client_id: str | None = None
     azure_client_secret: SecretStr | None = None
 
-    # Local email/password accounts for the dashboard.
+    # Dashboard sign-in with Microsoft Entra ID (single tenant). Uses the app
+    # registration above (AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET);
+    # AZURE_REDIRECT_URI must be registered on it as a Web redirect URI.
     auth_enabled: bool = True
+    azure_redirect_uri: str = "http://localhost:3000/api/auth/microsoft/callback"
+    # Where the browser lands after signing in (the Next.js frontend).
+    app_base_url: str = "http://localhost:3000"
     auth_database_path: Path = Path.home() / ".voice-agent" / "users.sqlite3"
     auth_jwt_secret: SecretStr | None = None
 
@@ -150,6 +155,12 @@ class Settings(BaseSettings):
                 "AZURE_CLIENT_ID and AZURE_CLIENT_SECRET"
             )
         return self
+
+    @property
+    def sso_configured(self) -> bool:
+        return bool(
+            self.azure_tenant_id and self.azure_client_id and self.azure_client_secret
+        )
 
     @property
     def agent_configured(self) -> bool:

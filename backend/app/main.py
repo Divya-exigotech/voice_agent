@@ -43,6 +43,26 @@ from app.services.voice_agent import AgentConnector, FoundryAgentConnector
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# OAuth callback query values (authorization code, state) must not reach logs.
+_SECRET_QUERY_VALUE = re.compile(r"(?i)\b(code|state|session_state)=[^&\s\"]*")
+
+
+class RedactSecretQueryFilter(logging.Filter):
+    """Redact sign-in codes from uvicorn's access log lines."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _SECRET_QUERY_VALUE.sub(r"\1=[redacted]", arg)
+                if isinstance(arg, str)
+                else arg
+                for arg in record.args
+            )
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(RedactSecretQueryFilter())
+
 _FROM_SETTINGS = object()
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -226,8 +246,8 @@ def create_app(
         started = time.monotonic()
         path = request.url.path
         public_api_paths = {
-            "/api/auth/register",
-            "/api/auth/login",
+            "/api/auth/microsoft/login",
+            "/api/auth/microsoft/callback",
             "/api/auth/session",
             "/api/auth/logout",
             "/api/health",

@@ -1,4 +1,9 @@
-"""Email/password registration, login and JWT session endpoints."""
+"""Microsoft Entra ID sign-in and the dashboard's JWT session endpoints.
+
+There are no local accounts or passwords: users sign in with their Microsoft
+work account (configured tenant only), and the backend then issues its own
+short-lived session token in an HttpOnly cookie.
+"""
 
 import base64
 import binascii
@@ -13,9 +18,11 @@ from math import ceil
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from fastapi.responses import RedirectResponse
 
-from app.services.auth_store import AuthStore, DuplicateEmailError
+from app.services import microsoft_sso
+from app.services.auth_store import AuthStore
+from app.services.microsoft_sso import SsoConfig, SsoError
 
 logger = logging.getLogger(__name__)
 
@@ -25,55 +32,9 @@ ACCESS_TOKEN_COOKIE = "voice_agent_access_token"
 ACCESS_TOKEN_TTL_SECONDS = 60 * 60
 TOKEN_ISSUER = "payment-followup-agent"
 TOKEN_AUDIENCE = "payment-followup-dashboard"
-EMAIL_PATTERN = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,}$")
-
-
-class RegisterRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-    email: str = Field(min_length=3, max_length=254)
-    password: SecretStr = Field(min_length=12, max_length=128)
-
-    @field_validator("name")
-    @classmethod
-    def normalize_name(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("Name is required.")
-        return normalized
-
-    @field_validator("email")
-    @classmethod
-    def normalize_email(cls, value: str) -> str:
-        normalized = value.strip().casefold()
-        if not EMAIL_PATTERN.fullmatch(normalized):
-            raise ValueError("Enter a valid email address.")
-        return normalized
-
-
-class LoginRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=254)
-    password: SecretStr = Field(min_length=1, max_length=128)
-
-    @field_validator("email")
-    @classmethod
-    def normalize_email(cls, value: str) -> str:
-        normalized = value.strip().casefold()
-        if not EMAIL_PATTERN.fullmatch(normalized):
-            raise ValueError("Enter a valid email address.")
-        return normalized
-
-
-class UserResponse(BaseModel):
-    id: str
-    name: str
-    email: str
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    expires_in: int = ACCESS_TOKEN_TTL_SECONDS
-    user: UserResponse
+# Short-lived cookie holding one sign-in attempt (state, nonce, PKCE verifier).
+SSO_STATE_COOKIE = "voice_agent_sso_state"
+SSO_COOKIE_PATH = "/api/auth/microsoft"
 
 
 def _b64encode(value: bytes) -> str:
@@ -268,53 +229,104 @@ def _is_secure_request(request: Request) -> bool:
     return scheme.strip().casefold() == "https"
 
 
-def _create_token_response(
-    user: dict[str, Any], store: AuthStore, request: Request, response: Response
-) -> TokenResponse:
-    token = _issue_access_token(user, store.signing_key)
-    _set_auth_cookie(response, request, token)
-    return TokenResponse(access_token=token, user=UserResponse(**user))
-
-
-@router.post("/register", response_model=TokenResponse, status_code=201)
-async def register(
-    payload: RegisterRequest, request: Request, response: Response
-) -> TokenResponse:
-    _validate_auth_origin(request)
-    store = _get_auth_store(request)
-    await _enforce_rate_limit(
-        request, store, "register", _client_address(request), 10, 3600
+def _sso_config(request: Request) -> SsoConfig:
+    settings = request.app.state.settings
+    if not settings.sso_configured:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Microsoft sign-in is not configured (set AZURE_TENANT_ID, "
+                "AZURE_CLIENT_ID and AZURE_CLIENT_SECRET)."
+            ),
+        )
+    return SsoConfig(
+        tenant_id=settings.azure_tenant_id,
+        client_id=settings.azure_client_id,
+        client_secret=settings.azure_client_secret.get_secret_value(),
+        redirect_uri=settings.azure_redirect_uri,
     )
+
+
+def _app_url(request: Request, path: str) -> str:
+    return request.app.state.settings.app_base_url.rstrip("/") + path
+
+
+@router.get("/microsoft/login")
+async def microsoft_login(request: Request) -> RedirectResponse:
+    """Send the browser to Microsoft to sign in."""
+    store = _get_auth_store(request)
+    config = _sso_config(request)
+    await _enforce_rate_limit(
+        request, store, "sso-login", _client_address(request), 30, 600
+    )
+    attempt = microsoft_sso.start_sign_in(config, store.signing_key)
+    response = RedirectResponse(attempt.url, status_code=status.HTTP_302_FOUND)
+    response.set_cookie(
+        key=SSO_STATE_COOKIE,
+        value=attempt.state_cookie,
+        max_age=microsoft_sso.STATE_TTL_SECONDS,
+        httponly=True,
+        secure=_is_secure_request(request),
+        # Lax: the cookie must come back on Microsoft's top-level redirect.
+        samesite="lax",
+        path=SSO_COOKIE_PATH,
+    )
+    return response
+
+
+@router.get("/microsoft/callback")
+async def microsoft_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+) -> RedirectResponse:
+    """Finish the Microsoft sign-in and start a dashboard session."""
+    store = _get_auth_store(request)
+    config = _sso_config(request)
     try:
-        user = await store.register(
-            payload.name, payload.email, payload.password.get_secret_value()
+        if error:
+            raise SsoError(
+                "cancelled" if error == "access_denied" else "failed",
+                f"Microsoft returned {error}: {(error_description or '')[:300]}",
+            )
+        attempt = microsoft_sso.read_state_cookie(
+            request.cookies.get(SSO_STATE_COOKIE), store.signing_key
         )
-    except DuplicateEmailError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists.",
-        ) from exc
-    return _create_token_response(user, store, request, response)
-
-
-@router.post("/login", response_model=TokenResponse)
-async def login(
-    payload: LoginRequest, request: Request, response: Response
-) -> TokenResponse:
-    _validate_auth_origin(request)
-    store = _get_auth_store(request)
-    await _enforce_rate_limit(request, store, "login-email", payload.email, 15, 600)
-    await _enforce_rate_limit(
-        request, store, "login-address", _client_address(request), 60, 600
+        if not state or not hmac.compare_digest(state, attempt["state"]):
+            raise SsoError("expired", "The sign-in state does not match.")
+        if not code:
+            raise SsoError("failed", "Microsoft did not return an authorization code.")
+        await _enforce_rate_limit(
+            request, store, "sso-callback", _client_address(request), 30, 600
+        )
+        tokens = await microsoft_sso.exchange_code(config, code, attempt["verifier"])
+        user = microsoft_sso.user_from_id_token(
+            tokens.get("id_token"), config, attempt["nonce"]
+        )
+    except SsoError as exc:
+        logger.warning("Microsoft sign-in failed (%s): %s", exc.code, exc)
+        response = RedirectResponse(
+            _app_url(request, f"/?error={exc.code}"),
+            status_code=status.HTTP_302_FOUND,
+        )
+    else:
+        logger.info("Microsoft sign-in succeeded for user %s", user["id"])
+        response = RedirectResponse(
+            _app_url(request, "/dashboard"), status_code=status.HTTP_302_FOUND
+        )
+        _set_auth_cookie(
+            response, request, _issue_access_token(user, store.signing_key)
+        )
+    response.delete_cookie(
+        key=SSO_STATE_COOKIE,
+        httponly=True,
+        secure=_is_secure_request(request),
+        samesite="lax",
+        path=SSO_COOKIE_PATH,
     )
-    user = await store.authenticate(payload.email, payload.password.get_secret_value())
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return _create_token_response(user, store, request, response)
+    return response
 
 
 @router.get("/session")
