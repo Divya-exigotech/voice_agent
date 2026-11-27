@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     azure_client_id: str | None = None
     azure_client_secret: SecretStr | None = None
 
+    # Local email/password accounts for the dashboard.
+    auth_enabled: bool = True
+    auth_database_path: Path = Path.home() / ".voice-agent" / "users.sqlite3"
+    auth_jwt_secret: SecretStr | None = None
+
     # --- Transcript storage (Azure Blob, M4) ------------------------------------
     # e.g. https://<account>.blob.core.windows.net. When unset, transcripts are
     # kept in memory (development only; lost on restart).

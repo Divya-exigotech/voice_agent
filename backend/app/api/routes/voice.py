@@ -19,6 +19,8 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.api.routes.auth import ACCESS_TOKEN_COOKIE, read_access_token
+from app.services.auth_store import AuthStore
 from app.services.conversation import AgentNotConfiguredError, ConversationService
 from app.services.session_manager import SessionNotActiveError, SessionNotFoundError
 from app.services.voice_agent import AgentError
@@ -64,6 +66,20 @@ async def voice_session(websocket: WebSocket, session_id: str) -> None:
         logger.warning("Rejected voice WebSocket from origin %s", origin)
         await websocket.close(code=CLOSE_FORBIDDEN_ORIGIN)
         return
+
+    if settings.auth_enabled:
+        store: AuthStore = websocket.app.state.auth_store
+        authorization = websocket.headers.get("authorization", "")
+        scheme, separator, credentials = authorization.partition(" ")
+        token = (
+            credentials.strip()
+            if separator and scheme.casefold() == "bearer"
+            else websocket.cookies.get(ACCESS_TOKEN_COOKIE)
+        )
+        user = read_access_token(token, store.signing_key)
+        if user is None or await store.is_token_revoked(user["token_id"]):
+            await websocket.close(code=4401)
+            return
 
     await websocket.accept()
 

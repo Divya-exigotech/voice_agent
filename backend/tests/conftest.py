@@ -100,6 +100,7 @@ TEST_TIMEOUT_SECONDS = 1.0
 def isolated_settings(**overrides: Any) -> Settings:
     """Settings that never touch real Azure or the database: ignore .env and clear endpoints."""
     values: dict[str, Any] = {
+        "auth_enabled": False,
         "azure_ai_project_endpoint": None,
         "azure_ai_agent_name": None,
         "azure_storage_account_url": None,

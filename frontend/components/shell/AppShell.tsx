@@ -2,6 +2,8 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 
+import { SignOutButton } from "@/components/auth/SignOutButton";
+
 import { Nav } from "./Nav";
 
 const KEY = "sidebar-collapsed";
@@ -48,6 +50,7 @@ export function AppShell({
           <img src="/brand/exigo-e-logo.svg" alt="Exigo Tech" className="logo-mark" />
         </div>
         <Nav />
+        <SignOutButton />
       </aside>
       <div className="shell-main">
         <header className="topbar">
@@ -62,7 +65,7 @@ export function AppShell({
               <path d="M4 6h16M4 12h16M4 18h16" />
             </svg>
           </button>
-          <div>
+          <div className="topbar-title">
             <h1>{title}</h1>
             <p>{subtitle}</p>
           </div>

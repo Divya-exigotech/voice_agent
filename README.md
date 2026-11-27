@@ -23,7 +23,7 @@ Telephony (M6) is deferred until the browser PoC is approved.
 data/customers.json        Single source of synthetic customer/invoice records (processed in file order)
 backend/                   FastAPI API
   app/main.py              App factory (loads + validates customers.json, builds the model client)
-  app/api/routes/          /api/customers, /api/queue, /api/sessions, /messages, /voice (WebSocket)
+  app/api/routes/          /api/auth, /api/customers, /api/queue, /api/sessions, /messages, /voice
   app/schemas/             Pydantic models (customer, session, transcript, chat)
   app/services/
     customer_repository.py JSON loading/validation
@@ -35,6 +35,7 @@ backend/                   FastAPI API
     voice_agent.py         Live connection to the Foundry voice agent: event pump, transcripts, tool calls
     conversation.py        One live agent session per app session (open, reuse, reconnect, close)
     transcript_storage.py  Transcript storage: Azure Blob (private container) or in-memory for development
+    auth_store.py          Persistent local user accounts and JWT signing key
   scripts/verify_agent.py  Live check: connect to the agent, show its tools, get the opening line and a reply
   scripts/setup_blob.py    Create/verify the private transcript container (sign-in, privacy, write/read/delete probe)
   app/evaluation/          Customer-reply scenarios and the runner used by scripts/evaluate_agent.py
@@ -44,7 +45,9 @@ docs/PRIVACY_REVIEW.md     Data inventory, controls, gaps and sign-off checklist
 infra/blob-lifecycle-policy.json  Example retention policy (cool after 30 days, delete after 90)
   tests/                   pytest (voice agent is faked; no network needed)
 frontend/                  Next.js 16 (App Router, TypeScript)
-  app/dashboard/           Dashboard page (`/` redirects here)
+  app/page.tsx              Login and registration page (`/`)
+  app/dashboard/           Protected dashboard page
+  proxy.ts                  Redirects unauthenticated visitors to sign in
   components/              Dashboard, CurrentCustomerCard, SequenceProgress, VoiceSessionPanel,
                            TranscriptPanel, ChatComposer, LastSessionCard
   lib/api.ts               Calls same-origin /api/*, which Next.js proxies to FastAPI
@@ -63,6 +66,20 @@ customer data is never published as a static asset. Override the path with `CUST
 - An existing **voice agent** in a Microsoft Foundry project
 - A way for `DefaultAzureCredential` to sign you in locally, such as the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) (`az login`)
 - Access to the Foundry project for your account
+
+## User registration and login
+
+Users can register with their name, email and a password of at least 12 characters, then sign in with that
+email/password. The backend exposes `POST /api/auth/register` and `POST /api/auth/login`; both return a one-hour
+HS256 JWT (`access_token`) and set the same token in an HttpOnly cookie for the browser. The browser uses that
+cookie for dashboard API calls; API clients can instead send `Authorization: Bearer <access_token>`.
+`GET /api/auth/session` validates the current browser session and `POST /api/auth/logout` clears its cookie.
+
+User records and the persistent JWT signing key are stored in
+`~/.voice-agent/users.sqlite3` (on Windows, under the current user's home directory). This does not require
+editing `.env`. Back up this file and use persistent storage for it when deploying; losing the signing key
+invalidates existing tokens. Self-registration is open, and registered accounts access the same shared dashboard;
+per-user data separation and role-based authorization are not implemented.
 
 ## Configure the Foundry voice agent (Entra ID, no keys)
 
@@ -216,10 +233,35 @@ cd backend;  pytest
 cd frontend; npm test; npm run lint; npm run typecheck
 ```
 
+## User authentication
+
+The login and registration page uses the backend endpoints `POST /api/auth/register` and `POST /api/auth/login`.
+Registration accepts a name, email and a password of at least 12 characters. Passwords are stored as salted
+PBKDF2-HMAC-SHA256 hashes; plaintext passwords are never saved. Both endpoints return a one-hour HS256 JWT
+and set the token as an HttpOnly, SameSite=Lax cookie. API clients can instead send
+`Authorization: Bearer <access_token>`. `GET /api/auth/session` checks the browser session, and
+`POST /api/auth/logout` revokes the current token and clears the cookie. Protected APIs and voice WebSockets
+reject missing, expired or revoked tokens. Authentication requests have SQLite-backed rate limits, and
+cookie-authenticated writes check the configured allowed origins.
+
+Accounts are stored in `~/.voice-agent/users.sqlite3` (Windows: under the current user's home directory).
+Set the process environment variable `AUTH_DATABASE_PATH` to use persistent deployment storage. The JWT key
+is stored persistently in that SQLite database by default; deployments can instead provide a random
+`AUTH_JWT_SECRET` of at least 32 characters through their secret manager. Rotating that key invalidates
+existing tokens. Neither setting requires editing `.env`.
+
+Registration is intentionally open. All registered users access the same shared dashboard data; email
+verification, password recovery, MFA, roles and per-user data isolation are not implemented. Add those
+controls before exposing registration to untrusted users or using real customer data.
+
 ## API
 
 | Method | Path | Purpose |
 |---|---|---|
+| POST | `/api/auth/register` | Register with name, email and password; returns an access token and sets the session cookie |
+| POST | `/api/auth/login` | Authenticate with email and password; returns an access token and sets the session cookie |
+| GET | `/api/auth/session` | Check whether the current browser session is valid |
+| POST | `/api/auth/logout` | Revoke the current token and clear the browser session cookie |
 | GET | `/api/health` | Readiness: `agent_configured`, `transcript_storage` (also at `/health`) |
 | GET | `/api/customers` | Validated customer list, in file order |
 | GET | `/api/queue` | Current position: `position`, `total`, `remaining`, `current_customer`, `active_session_id` |
@@ -250,7 +292,7 @@ Speakers ◄─ Web Audio player ◄─ PCM16 24 kHz ◄─ WebSocket ◄─ Fas
   - **Voice connection fails or the agent disconnects:** the partial transcript is kept. Typed replies still work, and **End Session** saves the session as `failed`, so the customer stays current and is retried, never skipped.
 - **Security.**
   - The WebSocket rejects browser origins that aren't in `ALLOWED_ORIGINS`.
-  - The PoC has no operator login. Add authentication before exposing it beyond localhost.
+  - Dashboard API requests and voice WebSockets require a valid JWT session; bearer tokens are also supported for API clients.
   - No audio is recorded or stored, only the text transcript.
 
 WebSocket messages, server to browser:
@@ -292,7 +334,7 @@ Browser to server: binary microphone audio and `{"type": "stop"}`.
 - **Access:**
   - The container is private and is never exposed as a URL. The browser reads transcripts only through `GET /api/sessions/{id}/transcript`, which looks up the blob name from the backend's own session record. Client-supplied paths aren't accepted, and names are checked against the transcript layout.
   - `customer_id` values are restricted to `A–Z a–z 0–9 _ -`, so they're safe in paths.
-  - **The PoC has no operator login.** Before real use, put the app behind Entra ID sign-in (for example Azure App Service authentication) so only authorized operators reach the API.
+  - Self-registration is open and accounts share the same dashboard data. Add user authorization and data isolation before exposing the app to untrusted users.
 
 ## Validation and safety (M5)
 
@@ -331,7 +373,7 @@ It prints the transcripts, writes a JSON report to `backend/reports/` (git-ignor
 - The dashboard shows readiness chips (agent configured; transcripts in Azure Blob or in memory), a collapsible **How to run the demo** guide, a timer, live review flags, and the session duration and flag count on the last session.
 - The agent's opening now says the conversation is transcribed.
 
-**Privacy.** See [docs/PRIVACY_REVIEW.md](docs/PRIVACY_REVIEW.md) for the data inventory, the controls in place, and the gaps and sign-off needed before using real customer data. The main gaps are operator authentication, the consent approach, retention, residency and collections conduct rules.
+**Privacy.** See [docs/PRIVACY_REVIEW.md](docs/PRIVACY_REVIEW.md) for the data inventory, the controls in place, and the gaps and sign-off needed before using real customer data. The main gaps are operator authorization, the consent approach, retention, residency and collections conduct rules.
 
 ## Sequencing rules
 

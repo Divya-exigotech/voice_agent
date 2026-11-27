@@ -15,11 +15,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
-from app.api.routes import api_router
+from app.api.routes import api_router, auth
 from app.config import Settings, get_settings
 from app.schemas.session import TranscriptTurn
 from app.services import latency
+from app.services.auth_store import AuthStore
 from app.services.azure_auth import build_async_credential
 from app.services.conversation import ConversationService
 from app.services.customer_repository import load_customers
@@ -97,6 +99,7 @@ def create_app(
     connector: AgentConnector | None | object = _FROM_SETTINGS,
     today: Callable[[], date] | None = None,
     database: PostgresStore | None | object = _FROM_SETTINGS,
+    auth_store: AuthStore | None = None,
 ) -> FastAPI:
     """Build the app. Tests inject `storage`, `connector`, `today` and `database`.
 
@@ -104,9 +107,19 @@ def create_app(
     because opening the async connection pool and loading the queue are awaited.
     """
     settings = settings or get_settings()
+    configured_jwt_secret = (
+        settings.auth_jwt_secret.get_secret_value().encode("utf-8")
+        if settings.auth_jwt_secret is not None
+        else None
+    )
+    user_store = auth_store or AuthStore(
+        settings.auth_database_path, signing_key=configured_jwt_secret
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if settings.auth_enabled:
+            await user_store.initialize()
         db: PostgresStore | None = (
             (
                 await PostgresStore.from_settings(settings)
@@ -203,6 +216,7 @@ def create_app(
         title="Payment Follow-up Agent PoC", version="0.2.0", lifespan=lifespan
     )
     app.state.settings = settings
+    app.state.auth_store = user_store
     app.include_router(api_router)
 
     @app.middleware("http")
@@ -210,7 +224,38 @@ def create_app(
         request: Request, call_next: Callable[[Request], Any]
     ) -> Any:
         started = time.monotonic()
-        response = await call_next(request)
+        path = request.url.path
+        public_api_paths = {
+            "/api/auth/register",
+            "/api/auth/login",
+            "/api/auth/session",
+            "/api/auth/logout",
+            "/api/health",
+        }
+        if (
+            settings.auth_enabled
+            and path.startswith("/api/")
+            and path not in public_api_paths
+        ):
+            if (
+                request.method in {"POST", "PUT", "PATCH", "DELETE"}
+                and request.cookies.get(auth.ACCESS_TOKEN_COOKIE)
+                and not auth.is_allowed_origin(request)
+            ):
+                response = JSONResponse(
+                    {"detail": "Request origin is not allowed."}, status_code=403
+                )
+            else:
+                user = await auth.user_from_request(request)
+                if user is None:
+                    response = JSONResponse(
+                        {"detail": "Authentication required."}, status_code=401
+                    )
+                else:
+                    request.state.user = user
+                    response = await call_next(request)
+        else:
+            response = await call_next(request)
         elapsed_ms = (time.monotonic() - started) * 1000
         logger.info(
             "latency http_ms=%d %s %s -> %d",
