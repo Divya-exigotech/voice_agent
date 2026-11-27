@@ -617,68 +617,6 @@ body {
   line-height: 1.65;
 }
 
-.auth-mode-tabs {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px;
-  margin: 24px 0 20px;
-  padding: 4px;
-  border-radius: 9px;
-  background: #f3f1fa;
-}
-
-.auth-mode-tabs button {
-  padding: 9px;
-  border: 0;
-  border-radius: 7px;
-  color: #66667f;
-  background: transparent;
-  font: inherit;
-  font-size: 0.84rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.auth-mode-tabs button.auth-mode-active {
-  color: #4c3aba;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(34, 24, 76, 0.12);
-}
-
-.auth-form {
-  display: grid;
-  gap: 15px;
-}
-
-.auth-form label {
-  display: grid;
-  gap: 7px;
-  color: #30304a;
-  font-size: 0.82rem;
-  font-weight: 600;
-}
-
-.auth-form input {
-  width: 100%;
-  min-height: 44px;
-  padding: 10px 12px;
-  border: 1px solid #dedde8;
-  border-radius: 7px;
-  color: #17172a;
-  background: #fff;
-  font: inherit;
-  font-size: 0.88rem;
-}
-
-.auth-form input::placeholder {
-  color: #a1a1b1;
-}
-
-.auth-form input:focus-visible {
-  border-color: #7040ce;
-  outline: 3px solid rgba(112, 64, 206, 0.15);
-}
-
 .auth-submit {
   min-height: 46px;
   margin-top: 3px;
@@ -702,7 +640,7 @@ body {
   opacity: 0.72;
 }
 
-.auth-mode-tabs button:focus-visible,
+.auth-microsoft:focus-visible,
 .auth-submit:focus-visible,
 .sign-out-button:focus-visible,
 .auth-footer a:focus-visible {
@@ -1187,3 +1125,21 @@ button.json-chip:focus-visible { outline: 2px solid var(--primary); outline-offs
 .latency-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
 .latency-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .latency-big { font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; margin: 8px 0 2px; font-variant-numeric: tabular-nums; }
+
+.auth-microsoft {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 28px;
+  text-decoration: none;
+}
+
+.auth-microsoft[aria-disabled="true"] {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.auth-sso-error {
+  margin-top: 20px;
+}

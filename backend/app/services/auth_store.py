@@ -1,4 +1,8 @@
-"""Persistent local account storage for dashboard authentication."""
+"""Persistent storage for dashboard sign-in: JWT signing key, revoked tokens, rate limits.
+
+Users sign in with Microsoft Entra ID (see app/services/microsoft_sso.py); no
+passwords or local accounts are stored.
+"""
 
 import asyncio
 import hashlib
@@ -7,18 +11,10 @@ import os
 import secrets
 import sqlite3
 import time
-import uuid
 from contextlib import closing
 from pathlib import Path
-from typing import Any
 
 DEFAULT_AUTH_DATABASE = Path.home() / ".voice-agent" / "users.sqlite3"
-PASSWORD_ITERATIONS = 600_000
-PASSWORD_SALT_BYTES = 16
-
-
-class DuplicateEmailError(Exception):
-    """Raised when an account already exists for an email address."""
 
 
 class AuthStore:
@@ -67,18 +63,6 @@ class AuthStore:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
-                    CREATE TABLE IF NOT EXISTS users (
-                        id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                        password_salt BLOB NOT NULL,
-                        password_hash BLOB NOT NULL,
-                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-            )
-            connection.execute(
-                """
                     CREATE TABLE IF NOT EXISTS auth_metadata (
                         key TEXT PRIMARY KEY,
                         value BLOB NOT NULL
@@ -121,37 +105,6 @@ class AuthStore:
                     )
         if os.name != "nt":
             os.chmod(self.path, 0o600)
-
-    async def register(self, name: str, email: str, password: str) -> dict[str, Any]:
-        salt = secrets.token_bytes(PASSWORD_SALT_BYTES)
-        password_hash = await asyncio.to_thread(_hash_password, password, salt)
-        return await asyncio.to_thread(
-            self._register_sync, name, email, salt, password_hash
-        )
-
-    def _register_sync(
-        self, name: str, email: str, salt: bytes, password_hash: bytes
-    ) -> dict[str, Any]:
-        user = {
-            "id": str(uuid.uuid4()),
-            "name": name,
-            "email": email,
-        }
-        try:
-            with closing(self._connect()) as connection, connection:
-                connection.execute(
-                    """
-                    INSERT INTO users (id, name, email, password_salt, password_hash)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (user["id"], user["name"], user["email"], salt, password_hash),
-                )
-        except sqlite3.IntegrityError as exc:
-            raise DuplicateEmailError from exc
-        return user
-
-    async def authenticate(self, email: str, password: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._authenticate_sync, email, password)
 
     async def consume_rate_limit(
         self, scope: str, identifier: str, limit: int, window_seconds: int
@@ -219,25 +172,3 @@ class AuthStore:
                 (token_id, int(time.time())),
             ).fetchone()
         return row is not None
-
-    def _authenticate_sync(self, email: str, password: str) -> dict[str, Any] | None:
-        with closing(self._connect()) as connection:
-            row = connection.execute(
-                "SELECT id, name, email, password_salt, password_hash "
-                "FROM users WHERE email = ?",
-                (email,),
-            ).fetchone()
-        if row is None:
-            _hash_password(password, b"unknown-account")
-            return None
-
-        password_hash = _hash_password(password, bytes(row["password_salt"]))
-        if not secrets.compare_digest(password_hash, bytes(row["password_hash"])):
-            return None
-        return {"id": row["id"], "name": row["name"], "email": row["email"]}
-
-
-def _hash_password(password: str, salt: bytes) -> bytes:
-    return hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS
-    )

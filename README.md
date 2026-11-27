@@ -67,19 +67,26 @@ customer data is never published as a static asset. Override the path with `CUST
 - A way for `DefaultAzureCredential` to sign you in locally, such as the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) (`az login`)
 - Access to the Foundry project for your account
 
-## User registration and login
+## Sign-in (Microsoft Entra ID)
 
-Users can register with their name, email and a password of at least 12 characters, then sign in with that
-email/password. The backend exposes `POST /api/auth/register` and `POST /api/auth/login`; both return a one-hour
-HS256 JWT (`access_token`) and set the same token in an HttpOnly cookie for the browser. The browser uses that
-cookie for dashboard API calls; API clients can instead send `Authorization: Bearer <access_token>`.
-`GET /api/auth/session` validates the current browser session and `POST /api/auth/logout` clears its cookie.
+The dashboard has no local accounts or passwords. Users sign in with their Microsoft work account
+(OpenID Connect authorization code flow with PKCE); only accounts in `AZURE_TENANT_ID` can sign in.
 
-User records and the persistent JWT signing key are stored in
-`~/.voice-agent/users.sqlite3` (on Windows, under the current user's home directory). This does not require
-editing `.env`. Back up this file and use persistent storage for it when deploying; losing the signing key
-invalidates existing tokens. Self-registration is open, and registered accounts access the same shared dashboard;
-per-user data separation and role-based authorization are not implemented.
+1. Use the app registration from `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` in `.env`.
+2. In Entra ID → App registrations → the app → **Authentication**, add a **Web** platform redirect URI equal
+   to `AZURE_REDIRECT_URI` (default `http://localhost:3000/api/auth/microsoft/callback`).
+3. Optional: set `APP_BASE_URL` (default `http://localhost:3000`), where the browser lands after signing in.
+4. Optional: to limit sign-in to some users, set **Assignment required** on the app's Enterprise application and
+   assign those users or groups.
+
+After Microsoft returns, the backend checks the ID token (issuer, audience, tenant, nonce, lifetime) and issues a
+one-hour HS256 session JWT in an HttpOnly, SameSite=Lax cookie. API clients can instead send
+`Authorization: Bearer <access_token>`. `GET /api/auth/session` checks the session and `POST /api/auth/logout`
+revokes it. Protected APIs and voice WebSockets reject missing, expired or revoked tokens.
+
+The JWT signing key, revoked tokens and sign-in rate limits are stored in `~/.voice-agent/users.sqlite3`
+(override with `AUTH_DATABASE_PATH`, or provide a random `AUTH_JWT_SECRET` of at least 32 characters).
+All signed-in users share the same dashboard; roles and per-user data separation are not implemented.
 
 ## Configure the Foundry voice agent (Entra ID, no keys)
 
@@ -233,33 +240,12 @@ cd backend;  pytest
 cd frontend; npm test; npm run lint; npm run typecheck
 ```
 
-## User authentication
-
-The login and registration page uses the backend endpoints `POST /api/auth/register` and `POST /api/auth/login`.
-Registration accepts a name, email and a password of at least 12 characters. Passwords are stored as salted
-PBKDF2-HMAC-SHA256 hashes; plaintext passwords are never saved. Both endpoints return a one-hour HS256 JWT
-and set the token as an HttpOnly, SameSite=Lax cookie. API clients can instead send
-`Authorization: Bearer <access_token>`. `GET /api/auth/session` checks the browser session, and
-`POST /api/auth/logout` revokes the current token and clears the cookie. Protected APIs and voice WebSockets
-reject missing, expired or revoked tokens. Authentication requests have SQLite-backed rate limits, and
-cookie-authenticated writes check the configured allowed origins.
-
-Accounts are stored in `~/.voice-agent/users.sqlite3` (Windows: under the current user's home directory).
-Set the process environment variable `AUTH_DATABASE_PATH` to use persistent deployment storage. The JWT key
-is stored persistently in that SQLite database by default; deployments can instead provide a random
-`AUTH_JWT_SECRET` of at least 32 characters through their secret manager. Rotating that key invalidates
-existing tokens. Neither setting requires editing `.env`.
-
-Registration is intentionally open. All registered users access the same shared dashboard data; email
-verification, password recovery, MFA, roles and per-user data isolation are not implemented. Add those
-controls before exposing registration to untrusted users or using real customer data.
-
 ## API
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/auth/register` | Register with name, email and password; returns an access token and sets the session cookie |
-| POST | `/api/auth/login` | Authenticate with email and password; returns an access token and sets the session cookie |
+| GET | `/api/auth/microsoft/login` | Redirect the browser to Microsoft Entra ID to sign in |
+| GET | `/api/auth/microsoft/callback` | Finish the Microsoft sign-in, set the session cookie and redirect to the dashboard |
 | GET | `/api/auth/session` | Check whether the current browser session is valid |
 | POST | `/api/auth/logout` | Revoke the current token and clear the browser session cookie |
 | GET | `/api/health` | Readiness: `agent_configured`, `transcript_storage` (also at `/health`) |

@@ -1,13 +1,17 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useState, useSyncExternalStore, type FormEvent } from "react";
+import { useState, useSyncExternalStore } from "react";
 
-type AuthMode = "login" | "register";
+// The backend sends the browser to Microsoft and back; it redirects here with
+// `?error=<code>` when sign-in does not complete.
+const SIGN_IN_URL = "/api/auth/microsoft/login";
 
-type AuthResponse = {
-  access_token?: string;
-  detail?: string;
+const ERROR_MESSAGES: Record<string, string> = {
+  cancelled: "Sign-in was cancelled. Choose your Microsoft account to continue.",
+  expired: "Your sign-in attempt expired. Please try again.",
+  unavailable: "Microsoft sign-in is unavailable right now. Please try again shortly.",
+  failed:
+    "Microsoft sign-in failed. Use your organisation account, or contact your administrator.",
 };
 
 function subscribeToHydration(): () => void {
@@ -22,156 +26,69 @@ function getServerSnapshot(): boolean {
   return false;
 }
 
+function signInError(): string {
+  const code = new URLSearchParams(window.location.search).get("error");
+  if (!code) return "";
+  return ERROR_MESSAGES[code] ?? ERROR_MESSAGES.failed;
+}
+
+function MicrosoftLogo() {
+  return (
+    <svg aria-hidden="true" width="18" height="18" viewBox="0 0 21 21">
+      <rect x="1" y="1" width="9" height="9" fill="#f25022" />
+      <rect x="11" y="1" width="9" height="9" fill="#7fba00" />
+      <rect x="1" y="11" width="9" height="9" fill="#00a4ef" />
+      <rect x="11" y="11" width="9" height="9" fill="#ffb900" />
+    </svg>
+  );
+}
+
 export function AuthPanel() {
-  const router = useRouter();
   const hydrated = useSyncExternalStore(
     subscribeToHydration,
     getHydratedSnapshot,
     getServerSnapshot,
   );
-  const [mode, setMode] = useState<AuthMode>("login");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-
-    const formData = new FormData(event.currentTarget);
-    const payload: Record<string, string> = {
-      email: String(formData.get("email") ?? ""),
-      password: String(formData.get("password") ?? ""),
-    };
-    if (mode === "register") {
-      payload.name = String(formData.get("name") ?? "");
-    }
-
-    try {
-      const response = await fetch(`/api/auth/${mode}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const result: AuthResponse = await response.json();
-      if (!response.ok) {
-        throw new Error(result.detail ?? "Authentication failed. Please try again.");
-      }
-      if (!result.access_token) {
-        throw new Error("The server did not return an access token.");
-      }
-      setBusy(false);
-      router.replace("/dashboard");
-      router.refresh();
-    } catch (submitError) {
-      setError(
-        submitError instanceof Error
-          ? submitError.message
-          : "Unable to connect. Please try again.",
-      );
-      setBusy(false);
-    }
-  }
-
-  function changeMode(nextMode: AuthMode) {
-    setMode(nextMode);
-    setError("");
-  }
-
-  const registering = mode === "register";
+  const [redirecting, setRedirecting] = useState(false);
 
   if (!hydrated) {
     return <div className="auth-card auth-card-loading" aria-hidden="true" />;
   }
 
+  const error = signInError();
+
   return (
     <div className="auth-card">
       <p className="auth-product-label">Payment Follow-up Agent</p>
-      <h2>{registering ? "Create your account" : "Welcome back"}</h2>
+      <h2>Welcome back</h2>
       <p className="auth-instructions">
-        {registering
-          ? "Register to securely access your workspace."
-          : "Sign in to continue to your workspace."}
+        Sign in with your Microsoft work account to continue to your workspace.
       </p>
-      <div className="auth-mode-tabs" role="tablist" aria-label="Account access">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={!registering}
-          className={!registering ? "auth-mode-active" : ""}
-          onClick={() => changeMode("login")}
-        >
-          Sign in
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={registering}
-          className={registering ? "auth-mode-active" : ""}
-          onClick={() => changeMode("register")}
-        >
-          Register
-        </button>
-      </div>
-      <form className="auth-form" onSubmit={submit}>
-        {registering && (
-          <label>
-            Full name
-            <input
-              autoComplete="name"
-              maxLength={100}
-              name="name"
-              placeholder="Your name"
-              required
-            />
-          </label>
-        )}
-        <label>
-          Email address
-          <input
-            autoComplete="email"
-            maxLength={254}
-            name="email"
-            placeholder="you@company.com"
-            required
-            type="email"
-          />
-        </label>
-        <label>
-          Password
-          <input
-            autoComplete={registering ? "new-password" : "current-password"}
-            maxLength={128}
-            minLength={registering ? 12 : 1}
-            name="password"
-            placeholder={registering ? "At least 12 characters" : "Enter your password"}
-            required
-            type="password"
-          />
-        </label>
-        {error && (
-          <p className="auth-error" role="alert">
-            {error}
-          </p>
-        )}
-        <button className="auth-submit" type="submit" disabled={busy}>
-          {busy
-            ? registering
-              ? "Creating account..."
-              : "Signing in..."
-            : registering
-              ? "Create account"
-              : "Sign in"}
-        </button>
-      </form>
+      {error && !redirecting && (
+        <p className="auth-error auth-sso-error" role="alert">
+          {error}
+        </p>
+      )}
+      <a
+        className="auth-submit auth-microsoft"
+        href={SIGN_IN_URL}
+        aria-disabled={redirecting}
+        onClick={(event) => {
+          if (redirecting) event.preventDefault();
+          setRedirecting(true);
+        }}
+      >
+        <MicrosoftLogo />
+        {redirecting ? "Redirecting to Microsoft..." : "Sign in with Microsoft"}
+      </a>
       <div className="auth-divider" aria-hidden="true">
         <span />
         <span>SECURE ACCESS</span>
         <span />
       </div>
       <p className="auth-help">
-        Your account is protected with a secure access token. Need help? Contact
-        your administrator.
+        Access is limited to your organisation&apos;s Microsoft Entra ID accounts.
+        Need help? Contact your administrator.
       </p>
       <footer className="auth-footer">
         <span>Privacy</span>

@@ -1,52 +1,45 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { render, screen } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { AuthPanel } from "@/components/auth/AuthPanel";
 
-const { replace, refresh } = vi.hoisted(() => ({
-  replace: vi.fn(),
-  refresh: vi.fn(),
-}));
-
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ replace, refresh }),
-}));
+function visit(search: string) {
+  window.history.replaceState(null, "", `/${search}`);
+}
 
 describe("AuthPanel", () => {
-  it("re-enables sign-in after success before navigating", async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ access_token: "valid-token" }),
-      }),
-    );
+  afterEach(() => visit(""));
+
+  it("offers only Microsoft sign-in", () => {
     render(<AuthPanel />);
 
-    await user.type(screen.getByRole("textbox", { name: /email address/i }), "user@example.com");
-    await user.type(screen.getByLabelText(/password/i), "correct-password");
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeEnabled();
-    });
-    expect(replace).toHaveBeenCalledWith("/dashboard");
+    const signIn = screen.getByRole("link", { name: /sign in with microsoft/i });
+    expect(signIn).toHaveAttribute("href", "/api/auth/microsoft/login");
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /register/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("does not server-render extension-sensitive login fields", () => {
+  it("explains why the previous sign-in did not complete", () => {
+    visit("?error=cancelled");
+    render(<AuthPanel />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/sign-in was cancelled/i);
+  });
+
+  it("shows a generic message for unknown error codes", () => {
+    visit("?error=something-else");
+    render(<AuthPanel />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/microsoft sign-in failed/i);
+  });
+
+  it("server-renders a placeholder until hydration", () => {
     const markup = renderToString(<AuthPanel />);
 
-    expect(markup).not.toContain('name="email"');
     expect(markup).toContain('class="auth-card auth-card-loading"');
-  });
-
-  it("renders the login fields after hydration", () => {
-    render(<AuthPanel />);
-
-    expect(screen.getByRole("textbox", { name: /email address/i })).toBeVisible();
-    expect(screen.getByLabelText(/password/i)).toBeVisible();
+    expect(markup).not.toContain("Sign in with Microsoft");
   });
 });
