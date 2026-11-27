@@ -6,4 +6,4 @@ class Base(DeclarativeBase):
 
 
 # Import models here so Alembic autogenerate can discover them.
-from app import models  # noqa: E402,F401
+from app import models  # noqa: F401

@@ -1,18 +1,38 @@
-import asyncio
+from typing import Annotated
 
-from app.core.config import settings
-from app.services.customer_loader import load_customers
-from app.services.sequence_service import SequenceService
+from fastapi import Depends, HTTPException, Request, status
 
-_service: SequenceService | None = None
-_init_lock = asyncio.Lock()
+from app.services.conversation import ConversationService
+from app.services.followup import FollowUpScheduler
+from app.services.monitoring import MonitoringStore
+from app.services.session_manager import SessionManager
 
 
-async def get_sequence_service() -> SequenceService:
-    """Lazily build the process-wide queue from the customer JSON file."""
-    global _service
-    if _service is None:
-        async with _init_lock:
-            if _service is None:
-                _service = SequenceService(await load_customers(settings.CUSTOMERS_FILE))
-    return _service
+async def get_session_manager(request: Request) -> SessionManager:
+    return request.app.state.session_manager
+
+
+async def get_conversation_service(request: Request) -> ConversationService:
+    return request.app.state.conversation_service
+
+
+async def get_followup_scheduler(request: Request) -> FollowUpScheduler:
+    return request.app.state.followup_scheduler
+
+
+async def get_monitoring_store(request: Request) -> MonitoringStore:
+    store = getattr(request.app.state, "monitoring", None)
+    if store is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Live monitoring needs the PostgreSQL database (DATABASE_URL is not set)",
+        )
+    return store
+
+
+FollowUpSchedulerDep = Annotated[FollowUpScheduler, Depends(get_followup_scheduler)]
+SessionManagerDep = Annotated[SessionManager, Depends(get_session_manager)]
+ConversationServiceDep = Annotated[
+    ConversationService, Depends(get_conversation_service)
+]
+MonitoringStoreDep = Annotated[MonitoringStore, Depends(get_monitoring_store)]

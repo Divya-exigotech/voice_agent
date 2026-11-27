@@ -1,0 +1,212 @@
+[
+  {
+    "customer_id": "cust_demo_001",
+    "customer_name": "Aarav Patel",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "English",
+    "invoice": {
+      "invoice_id": "inv_demo_001",
+      "invoice_number": "INV-1001",
+      "amount_due": 2500,
+      "currency": "INR",
+      "due_date": "2026-11-10",
+      "payment_status": "unpaid"
+    }
+  },
+  {
+    "customer_id": "cust_demo_002",
+    "customer_name": "Mira Shah",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "English",
+    "invoice": {
+      "invoice_id": "inv_demo_002",
+      "invoice_number": "INV-1002",
+      "amount_due": 1800,
+      "currency": "INR",
+      "due_date": "2026-11-12",
+      "payment_status": "unpaid"
+    }
+  },
+  {
+    "customer_id": "cust_demo_003",
+    "customer_name": "Rohan Mehta",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "English",
+    "invoice": {
+      "invoice_id": "inv_demo_003",
+      "invoice_number": "INV-1003",
+      "amount_due": 4250.5,
+      "currency": "INR",
+      "due_date": "2026-11-05",
+      "payment_status": "overdue"
+    }
+  },
+  {
+    "customer_id": "cust_demo_004",
+    "customer_name": "Ananya Iyer",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "English",
+    "invoice": {
+      "invoice_id": "inv_demo_004",
+      "invoice_number": "INV-1004",
+      "amount_due": 950,
+      "currency": "INR",
+      "due_date": "2026-11-15",
+      "payment_status": "partially_paid"
+    }
+  },
+  {
+    "customer_id": "cust_demo_005",
+    "customer_name": "Kabir Singh",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "Hindi",
+    "invoice": {
+      "invoice_id": "inv_demo_005",
+      "invoice_number": "INV-1005",
+      "amount_due": 3200,
+      "currency": "INR",
+      "due_date": "2026-11-18",
+      "payment_status": "unpaid"
+    }
+  },
+  {
+    "customer_id": "cust_demo_006",
+    "customer_name": "Diya Desai",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "Gujarati",
+    "invoice": {
+      "invoice_id": "inv_demo_006",
+      "invoice_number": "INV-1006",
+      "amount_due": 1200,
+      "currency": "INR",
+      "due_date": "2026-11-20",
+      "payment_status": "unpaid"
+    }
+  },
+  {
+    "customer_id": "cust_demo_007",
+    "customer_name": "Vikram Joshi",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "English",
+    "invoice": {
+      "invoice_id": "inv_demo_007",
+      "invoice_number": "INV-1007",
+      "amount_due": 7800,
+      "currency": "INR",
+      "due_date": "2026-10-28",
+      "payment_status": "overdue"
+    }
+  },
+  {
+    "customer_id": "cust_demo_008",
+    "customer_name": "Priya Nair",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "Hindi",
+    "invoice": {
+      "invoice_id": "inv_demo_008",
+      "invoice_number": "INV-1008",
+      "amount_due": 560.75,
+      "currency": "INR",
+      "due_date": "2026-11-25",
+      "payment_status": "unpaid"
+    }
+  },
+  {
+    "customer_id": "cust_demo_009",
+    "customer_name": "Siddharth Rao",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "English",
+    "invoice": {
+      "invoice_id": "inv_demo_009",
+      "invoice_number": "INV-1009",
+      "amount_due": 15000,
+      "currency": "INR",
+      "due_date": "2026-11-30",
+      "payment_status": "partially_paid"
+    }
+  },
+  {
+    "customer_id": "cust_demo_010",
+    "customer_name": "Neha Kapoor",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "Gujarati",
+    "invoice": {
+      "invoice_id": "inv_demo_010",
+      "invoice_number": "INV-1010",
+      "amount_due": 2100,
+      "currency": "INR",
+      "due_date": "2026-11-01",
+      "payment_status": "overdue"
+    }
+  },
+  {
+    "customer_id": "cust_demo_011",
+    "customer_name": "Arjun Verma",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "English",
+    "invoice": {
+      "invoice_id": "inv_demo_011",
+      "invoice_number": "INV-1011",
+      "amount_due": 3999.99,
+      "currency": "INR",
+      "due_date": "2026-12-05",
+      "payment_status": "unpaid"
+    }
+  },
+  {
+    "customer_id": "cust_demo_012",
+    "customer_name": "Isha Reddy",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "Hindi",
+    "invoice": {
+      "invoice_id": "inv_demo_012",
+      "invoice_number": "INV-1012",
+      "amount_due": 640,
+      "currency": "INR",
+      "due_date": "2026-11-22",
+      "payment_status": "unpaid"
+    }
+  },
+  {
+    "customer_id": "cust_demo_013",
+    "customer_name": "Karan Malhotra",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "English",
+    "invoice": {
+      "invoice_id": "inv_demo_013",
+      "invoice_number": "INV-1013",
+      "amount_due": 5400,
+      "currency": "INR",
+      "due_date": "2026-11-08",
+      "payment_status": "overdue"
+    }
+  },
+  {
+    "customer_id": "cust_demo_014",
+    "customer_name": "Sneha Kulkarni",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "Gujarati",
+    "invoice": {
+      "invoice_id": "inv_demo_014",
+      "invoice_number": "INV-1014",
+      "amount_due": 875.5,
+      "currency": "INR",
+      "due_date": "2026-12-01",
+      "payment_status": "partially_paid"
+    }
+  },
+  {
+    "customer_id": "cust_demo_015",
+    "customer_name": "Rahul Bansal",
+    "phone_number": "+91XXXXXXXXXX",
+    "preferred_language": "Hindi",
+    "invoice": {
+      "invoice_id": "inv_demo_015",
+      "invoice_number": "INV-1015",
+      "amount_due": 12750,
+      "currency": "INR",
+      "due_date": "2026-11-27",
+      "payment_status": "unpaid"
+    }
+  }
+]

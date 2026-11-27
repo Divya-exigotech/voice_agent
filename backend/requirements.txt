@@ -1,8 +1,14 @@
-fastapi>=0.115
+fastapi>=0.115,<1.0
 uvicorn[standard]>=0.32
-pydantic-settings>=2.6
-sqlalchemy>=2.0.36
-psycopg[binary]>=3.2
-alembic>=1.14
-httpx>=0.28
-python-dotenv>=1.0
+pydantic>=2.9,<3.0
+pydantic-settings>=2.6,<3.0
+# Existing Microsoft Foundry voice agent (realtime) + Entra ID auth
+azure-ai-projects[voice]>=2.11.0
+azure-identity>=1.17.0,<2.0.0
+aiohttp>=3.9
+# Transcript storage in a private Azure Blob container (Entra ID auth)
+azure-storage-blob>=12.19
+# IANA time zones on Windows (zoneinfo has no system database there)
+tzdata>=2024.1
+# Existing PostgreSQL database: call queue, customers/invoices, calls, transcripts
+psycopg[binary,pool]>=3.2,<4

@@ -1,16 +1,16 @@
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-src = ["."]
-extend-exclude = ["alembic"]
-
-[tool.ruff.lint]
-select = [
-  "E", "F", "W", "I", "N", "UP", "B", "ASYNC", "S", "C4", "SIM", "RUF", "PT", "T20", "DTZ",
-]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+[project]
+name = "payment-followup-backend"
+version = "0.1.0"
+description = "FastAPI backend for the Azure AI Foundry payment follow-up voice agent PoC"
+requires-python = ">=3.11"
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.ruff]
+# Resolve first-party imports (app, tests, scripts) the same way wherever ruff runs
+# from (backend/ or the repo root, e.g. an editor opened on the whole repo).
+src = ["."]
