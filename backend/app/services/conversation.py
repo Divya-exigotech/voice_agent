@@ -42,6 +42,21 @@ MAX_TURN_CHARS = 5000
 VoiceSink = Callable[[Any], Awaitable[None]]
 
 
+# Outcomes after which the dashboard ends the voice call by itself (keep in
+# sync with AUTO_OUTCOMES in frontend/components/Dashboard.tsx).
+AUTO_END_OUTCOMES = {"payment_promised", "reported_paid", "needs_human_review"}
+
+
+def ends_call(proposal: OutcomeProposal) -> bool:
+    """True when this recorded outcome makes the dashboard end the call."""
+    outcome = getattr(proposal.outcome, "value", proposal.outcome)
+    if proposal.end_call:
+        return True
+    if outcome == "payment_promised":
+        return proposal.promised_payment_date is not None
+    return outcome in AUTO_END_OUTCOMES
+
+
 class AgentNotConfiguredError(Exception):
     pass
 
@@ -133,8 +148,12 @@ class ConversationService:
         snapshot = await self._manager.get_conversation(
             session_id
         )  # 404 / 409 if not active
-        await self._ensure_live(session_id, snapshot)
+        live = await self._ensure_live(session_id, snapshot)
         self._sinks[session_id] = sink
+        # Silence/hold notes only make sense while someone is on the voice call.
+        live.set_idle_prompts(
+            snapshot.proposal is None or not ends_call(snapshot.proposal)
+        )
         await sink({"type": "ready", **await self._transcript_payload(session_id)})
         if not snapshot.turns and session_id not in self._busy:
             await self._live[session_id].create_response()  # agent speaks first
@@ -142,6 +161,9 @@ class ConversationService:
     async def detach_voice(self, session_id: str, sink: VoiceSink) -> None:
         if self._sinks.get(session_id) is sink:
             del self._sinks[session_id]
+            live = self._live.get(session_id)
+            if live is not None:
+                live.set_idle_prompts(False)
 
     async def append_audio(self, session_id: str, pcm16: bytes) -> None:
         live = self._live.get(session_id)
@@ -288,5 +310,11 @@ class ConversationService:
             return json.dumps(
                 {"recorded": False, "error": "The session has already ended"}
             )
+        if ends_call(result.proposal):
+            # The agent is wrapping up and the call ends by itself: no more
+            # "are you there?" prompts after its goodbye.
+            live = self._live.get(session_id)
+            if live is not None:
+                live.set_idle_prompts(False)
         await self._emit_transcript(session_id)
         return json.dumps({"recorded": True})

@@ -92,3 +92,15 @@ def test_tool_excludes_system_only_outcome() -> None:
     assert "technical_failure" not in enum
     assert set(enum) == {o.value for o in MODEL_OUTCOMES}
     assert len(enum) == 7
+
+
+def test_context_explains_the_silence_and_hold_notes(sample_customers) -> None:
+    from app.services.agent_prompt import HOLD_NOTE, SILENCE_NOTE
+
+    text = build_session_context(
+        customer=sample_customers[0],
+        today=date(2026, 5, 18),
+        organization="Acme Accounts",
+    )
+    assert SILENCE_NOTE in text
+    assert HOLD_NOTE in text

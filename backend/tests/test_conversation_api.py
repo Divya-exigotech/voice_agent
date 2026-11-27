@@ -350,3 +350,22 @@ def test_agent_may_repeat_the_customers_own_amount_and_promised_date(
     say(client, sid, None)
     body = say(client, sid, "I can pay 150 rupees now and the rest on Friday").json()
     assert body["review_flags"] == []
+
+
+def test_ends_call_matches_the_dashboard_auto_end_rule() -> None:
+    from datetime import UTC, date, datetime
+
+    from app.schemas.session import OutcomeProposal
+    from app.services.conversation import ends_call
+
+    def proposal(outcome: str, **extra) -> OutcomeProposal:
+        return OutcomeProposal(outcome=outcome, proposed_at=datetime.now(UTC), **extra)
+
+    assert ends_call(
+        proposal("payment_promised", promised_payment_date=date(2026, 12, 1))
+    )
+    assert not ends_call(proposal("payment_promised"))  # agent still asks for a date
+    assert ends_call(proposal("reported_paid"))
+    assert ends_call(proposal("needs_human_review"))
+    assert not ends_call(proposal("callback_requested"))
+    assert ends_call(proposal("callback_requested", end_call=True))
